@@ -157,14 +157,37 @@ def run_cli():
     """
     Main entry point for CLI interface.
     """
-    # Setup logging
+    import io
+    
+    # Setup logging with proper UTF-8 handling
+    file_handler = logging.FileHandler('chatbot.log', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+    
+    # Console handler with UTF-8 wrapping for Windows
+    if sys.platform == 'win32':
+        # Wrap stdout to handle UTF-8
+        console_stream = io.TextIOWrapper(
+            sys.stdout.buffer,
+            encoding='utf-8',
+            errors='replace',
+            line_buffering=True
+        )
+    else:
+        console_stream = sys.stdout
+    
+    console_handler = logging.StreamHandler(console_stream)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+    
+    # Configure root logger
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('chatbot.log'),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=[file_handler, console_handler]
     )
     
     console = Console()
@@ -186,8 +209,7 @@ def run_cli():
         console.print(f"\n[red]Failed to start chatbot: {str(e)}[/red]")
         logger.error(f"Failed to start chatbot: {e}", exc_info=True)
         sys.exit(1)
-
-
+        
 if __name__ == "__main__":
     run_cli()
 

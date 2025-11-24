@@ -11,7 +11,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich import print as rprint
-from src.chatbot import CryptoChatbot
+from src import CryptoChatbot
 
 logger = logging.getLogger(__name__)
 

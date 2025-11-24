@@ -5,8 +5,8 @@ Price analysis tool for LangGraph agent.
 from typing import Dict, Any
 import logging
 from langchain_core.tools import tool
-from src.analyzers.price_analyzer import PriceAnalyzer
-from src.memory.cache_manager import cache_manager
+from src.analyzers import PriceAnalyzer
+from src.memory import cache_manager
 
 logger = logging.getLogger(__name__)
 

@@ -5,19 +5,23 @@ Orchestrates all components and provides a clean API for any interface (CLI, Web
 
 import logging
 from typing import Optional, Dict, Any
-from src.agents.crypto_agent import CryptoAgent
-from src.analyzers.fundamental_analyzer import FundamentalAnalyzer
-from src.analyzers.price_analyzer import PriceAnalyzer
-from src.analyzers.technical_analyzer import TechnicalAnalyzer
-from src.analyzers.sentiment_analyzer import SentimentAnalyzer
-from src.analyzers.comparative_analyzer import ComparativeAnalyzer
-from src.data_sources.coingecko_client import CoinGeckoClient
-from src.data_sources.coinmarketcap_client import CoinMarketCapClient
-from src.data_sources.lunarcrush_client import LunarCrushClient
-from src.data_sources.cryptopanic_client import CryptoPanicClient
-from src.data_sources.messari_client import MessariClient
-from src.data_sources.fear_greed_client import FearGreedClient
-from src.utils.config import config
+from src.agents import CryptoAgent
+from src.analyzers import (
+    FundamentalAnalyzer,
+    PriceAnalyzer,
+    TechnicalAnalyzer,
+    SentimentAnalyzer,
+    ComparativeAnalyzer,
+)
+from src.data_sources import (
+    CoinGeckoClient,
+    CoinMarketCapClient,
+    LunarCrushClient,
+    CryptoPanicClient,
+    MessariClient,
+    FearGreedClient,
+)
+from src.utils import config
 
 logger = logging.getLogger(__name__)
 

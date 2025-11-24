@@ -5,8 +5,8 @@ Sentiment analysis tool for LangGraph agent.
 from typing import Dict, Any
 import logging
 from langchain_core.tools import tool
-from src.analyzers.sentiment_analyzer import SentimentAnalyzer
-from src.memory.cache_manager import cache_manager
+from src.analyzers import SentimentAnalyzer
+from src.memory import cache_manager
 
 logger = logging.getLogger(__name__)
 

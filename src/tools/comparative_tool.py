@@ -5,8 +5,8 @@ Comparative analysis tool for LangGraph agent.
 from typing import Dict, Any, List
 import logging
 from langchain_core.tools import tool
-from src.analyzers.comparative_analyzer import ComparativeAnalyzer
-from src.memory.cache_manager import cache_manager
+from src.analyzers import ComparativeAnalyzer
+from src.memory import cache_manager
 
 logger = logging.getLogger(__name__)
 

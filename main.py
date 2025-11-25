@@ -3,7 +3,7 @@ Main entry point for Crypto Analysis Chatbot.
 Run this file to start the CLI interface.
 
 Usage:
-    python main.py           # Production mode (only warnings/errors in console)
+    python main.py           # Production mode (only errors in console, warnings/errors in log file)
     python main.py --verbose # Development mode (all logs in console)
 """
 
@@ -24,14 +24,14 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py           # Run in production mode (clean console output)
-  python main.py --verbose # Run in development mode (detailed API logs)
+  python main.py           # Run in production mode (only errors in console, all logs in file)
+  python main.py --verbose # Run in development mode (all logs in console and file)
         """
     )
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
-        help='Enable verbose logging (shows all API calls and debug info in console)'
+        help='Enable verbose logging (shows INFO/WARNING/ERROR in console, default: only ERROR)'
     )
     parser.add_argument(
         '-s', '--session',

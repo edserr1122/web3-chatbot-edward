@@ -20,6 +20,7 @@ from src.data_sources import (
     MessariClient,
     FearGreedClient,
 )
+from typing import Optional
 from src.utils import config, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,10 @@ class CryptoChatbot:
     Handles initialization and provides clean API for any interface.
     """
     
-    def __init__(self):
+    def __init__(self, user_id: str = "cli_user", session_id: Optional[str] = None):
         """Initialize the chatbot with all components."""
+        self.user_id = user_id
+        self.session_id = session_id
         # Ensure logging is configured even in non-CLI contexts (tests, notebooks, etc.)
         setup_logging(enable_console=False)
         logger.info("🚀 Initializing Crypto Analysis Chatbot...")
@@ -49,6 +52,7 @@ class CryptoChatbot:
         
         # Initialize agent
         self._init_agent()
+        self.session_id = self.agent.thread_id
         
         logger.info("✅ Crypto Analysis Chatbot initialized successfully")
     
@@ -204,7 +208,9 @@ class CryptoChatbot:
             price_analyzer=self.price_analyzer,
             technical_analyzer=self.technical_analyzer,
             sentiment_analyzer=self.sentiment_analyzer,
-            comparative_analyzer=self.comparative_analyzer
+            comparative_analyzer=self.comparative_analyzer,
+            user_id=self.user_id,
+            session_id=self.session_id
         )
         
         logger.info("  ✓ LangGraph agent initialized")
@@ -233,6 +239,7 @@ class CryptoChatbot:
     def clear_conversation(self):
         """Clear the conversation history."""
         self.agent.clear_memory()
+        self.session_id = self.agent.thread_id
         logger.info("Conversation history cleared")
     
     def set_session(self, session_id: str):
@@ -243,6 +250,11 @@ class CryptoChatbot:
             session_id: Session identifier
         """
         self.agent.set_session(session_id)
+        self.session_id = self.agent.thread_id
+    
+    def get_session_id(self) -> str:
+        """Return current session/thread ID."""
+        return self.agent.thread_id
     
     def get_available_data_sources(self) -> Dict[str, bool]:
         """
@@ -274,7 +286,7 @@ class CryptoChatbot:
         print("=" * 70 + "\n")
 
 
-def create_chatbot() -> CryptoChatbot:
+def create_chatbot(user_id: str = "cli_user", session_id: Optional[str] = None) -> CryptoChatbot:
     """
     Factory function to create and initialize a chatbot instance.
     
@@ -285,7 +297,7 @@ def create_chatbot() -> CryptoChatbot:
         RuntimeError: If initialization fails
     """
     try:
-        return CryptoChatbot()
+        return CryptoChatbot(user_id=user_id, session_id=session_id)
     except Exception as e:
         logger.error(f"Failed to create chatbot: {e}", exc_info=True)
         raise RuntimeError(f"Chatbot initialization failed: {e}")

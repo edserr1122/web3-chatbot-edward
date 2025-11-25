@@ -182,7 +182,7 @@ Stay informed and trade wisely! 🚀
             sys.exit(1)
 
 
-def run_cli(verbose: bool = False):
+def run_cli(verbose: bool = False, session_id: Optional[str] = None):
     """
     Main entry point for CLI interface.
     
@@ -202,7 +202,14 @@ def run_cli(verbose: bool = False):
         else:
             logger.info("🔇 Production mode - Console shows only warnings/errors (all logs saved to chatbot.log)")
         
-        chatbot = CryptoChatbot()
+        default_user_id = os.getenv("CLI_USER_ID", "cli_user")
+        chatbot = CryptoChatbot(user_id=default_user_id, session_id=session_id)
+        active_session = chatbot.get_session_id()
+        console.print(f"[dim]Session ID: {active_session}[/dim]")
+        if not session_id:
+            logger.info(f"Started new session: {active_session}")
+        else:
+            logger.info(f"Resumed session: {active_session}")
         
         # Flush logs after initialization
         flush_log_handler(file_handler)

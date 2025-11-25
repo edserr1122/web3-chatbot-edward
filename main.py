@@ -33,10 +33,15 @@ Examples:
         action='store_true',
         help='Enable verbose logging (shows all API calls and debug info in console)'
     )
+    parser.add_argument(
+        '-s', '--session',
+        type=str,
+        help='Optional session ID to resume (default: new session)'
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_cli(verbose=args.verbose)
+    run_cli(verbose=args.verbose, session_id=args.session)
 

@@ -47,8 +47,13 @@ class Config:
     REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
     REDIS_ENABLED: bool = os.getenv("REDIS_ENABLED", "false").lower() == "true"
     
-    # Cache Settings
+    # Cache & History Settings
     CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", "300"))  # 5 minutes
+    HISTORY_DB_PATH: str = os.getenv(
+        "HISTORY_DB_PATH",
+        os.path.join(os.getcwd(), "data", "chat_history.db")
+    )
+    HISTORY_CONTEXT_LIMIT: int = int(os.getenv("HISTORY_CONTEXT_LIMIT", "20"))
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

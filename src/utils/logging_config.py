@@ -29,7 +29,9 @@ def setup_logging(
     Args:
         log_file: Optional explicit log file path. Defaults to CHATBOT_LOG_FILE env
                   or `chatbot.log` in the current working directory.
-        verbose:  If True, console handler logs INFO level, otherwise WARNING.
+        verbose:  If True, console handler logs INFO/WARNING/ERROR level.
+                  If False (production mode), console handler logs only ERROR level.
+                  File handler always logs INFO and above regardless of verbose setting.
         enable_console: Whether to attach a console handler. CLI sets this True,
                         headless contexts (API/tests) can keep it False.
 
@@ -80,7 +82,8 @@ def setup_logging(
             root_logger.addHandler(console_handler)
             _CONSOLE_HANDLER = console_handler
         elif _CONSOLE_HANDLER is not None:
-            _CONSOLE_HANDLER.setLevel(logging.INFO if verbose else logging.WARNING)
+            # Update console handler level based on verbose mode
+            _CONSOLE_HANDLER.setLevel(logging.INFO if verbose else logging.ERROR)
 
     return _FILE_HANDLER
 
@@ -98,7 +101,13 @@ def _create_console_handler(*, verbose: bool) -> logging.Handler:
         )
 
     console_handler = logging.StreamHandler(stream)
-    console_handler.setLevel(logging.INFO if verbose else logging.WARNING)
+    # In production: only show errors in console by default, warnings/errors only with verbose
+    # File handler always logs everything (INFO and above)
+    if verbose:
+        console_handler.setLevel(logging.INFO)  # Show INFO, WARNING, ERROR in verbose mode
+    else:
+        console_handler.setLevel(logging.ERROR)  # Only show ERROR in non-verbose mode (production)
+    
     console_handler.setFormatter(
         logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

@@ -270,12 +270,28 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         
         # Add system message if this is the first call (no system message in history)
         if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=self.SYSTEM_PROMPT)] + messages
+            # Check if this is an unknown intent that might be off-topic
+            intent = state.get("intent", "unknown")
+            system_prompt = self.SYSTEM_PROMPT
+            
+            # For unknown intents, add specialization paragraph to help redirect off-topic queries
+            if intent == "unknown":
+                try:
+                    specialization_paragraph = self._generate_specialization_paragraph(messages)
+                    system_prompt = f"""{self.SYSTEM_PROMPT}
+
+**Important Note for Unknown/Off-Topic Queries:**
+{specialization_paragraph}
+
+If the user's query is not related to cryptocurrency, politely explain your specialization and redirect them to crypto-related topics."""
+                except Exception as e:
+                    logger.warning(f"Failed to generate specialization paragraph for unknown intent: {e}")
+                    # Continue with default system prompt
+            
+            messages = [SystemMessage(content=system_prompt)] + messages
         
         # Call LLM with full conversation history - this includes all previous messages
         response = self.llm_with_tools.invoke(messages)
-
-        print("response", response)
         
         # Check if response was truncated by examining response_metadata
         is_truncated = False
@@ -802,14 +818,48 @@ Return ONLY a JSON object:
         intent = state.get("intent", "unknown")
         tokens = state.get("tokens", [])
         
-        # Get the original user query
-        for msg in messages:
+        # Get the CURRENT user query (most recent HumanMessage)
+        for msg in reversed(messages):
             if isinstance(msg, HumanMessage):
                 user_query = msg.content
                 break
         
-        # Evaluate using LLM
-        evaluation_prompt = f"""You are a quality evaluator for cryptocurrency analysis responses.
+        # Adjust evaluation criteria based on intent
+        if intent in ["off_topic", "small_talk"]:
+            # For off-topic and small talk, focus on completeness and helpfulness, not crypto relevance
+            evaluation_prompt = f"""You are a quality evaluator for chatbot responses.
+
+Evaluate the following response based on two criteria:
+1. **Completeness**: Is the response complete? Does it end properly without truncation?
+2. **Helpfulness**: Is the response helpful, polite, and appropriate for the user's query?
+
+**User Query**: {user_query}
+**Intent**: {intent} (This is an off-topic or small talk query - the response is intentionally not about cryptocurrency)
+
+**Response to Evaluate**:
+{response_content}
+
+**Instructions**:
+- For off-topic/small_talk responses, DO NOT penalize for not being crypto-related - that's expected!
+- Focus on whether the response is complete, helpful, and appropriate
+- Return a JSON object with:
+  - "completeness_score": 0.0-1.0 (1.0 = complete, 0.0 = incomplete/truncated)
+  - "helpfulness_score": 0.0-1.0 (1.0 = very helpful and appropriate, 0.0 = not helpful)
+  - "overall_score": 0.0-1.0 (weighted average: completeness 50%, helpfulness 50%)
+  - "feedback": Brief explanation of scores and any issues found
+
+**Example Response**:
+{{
+  "completeness_score": 0.9,
+  "helpfulness_score": 0.9,
+  "overall_score": 0.90,
+  "feedback": "Response is complete and helpful. Appropriately handles off-topic query."
+}}
+
+Return ONLY the JSON object, no additional text."""
+        else:
+            # For crypto analysis, use full criteria
+            evaluation_prompt = f"""You are a quality evaluator for cryptocurrency analysis responses.
 
 Evaluate the following response based on three criteria:
 1. **Completeness**: Is the response complete? Does it end properly without truncation?
@@ -856,7 +906,19 @@ Return ONLY the JSON object, no additional text."""
                 # Fallback: try parsing the whole response
                 evaluation_json = json.loads(evaluation_text)
             
-            overall_score = evaluation_json.get("overall_score", 0.5)
+            # Handle different score structures based on intent
+            if intent in ["off_topic", "small_talk"]:
+                # For off-topic/small_talk, use helpfulness_score if available, otherwise default
+                overall_score = evaluation_json.get("overall_score", 0.5)
+                if "helpfulness_score" in evaluation_json and "overall_score" not in evaluation_json:
+                    # Calculate overall from completeness and helpfulness if not provided
+                    completeness = evaluation_json.get("completeness_score", 0.5)
+                    helpfulness = evaluation_json.get("helpfulness_score", 0.5)
+                    overall_score = (completeness * 0.5) + (helpfulness * 0.5)
+            else:
+                # For crypto analysis, use standard overall_score
+                overall_score = evaluation_json.get("overall_score", 0.5)
+            
             feedback = evaluation_json.get("feedback", "Evaluation completed")
             
             overall_score_float = float(overall_score)
@@ -1193,6 +1255,75 @@ Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive
                 "Could you please ask me something related to cryptocurrency analysis?"
             )
     
+    def _generate_specialization_paragraph(self, messages: List[BaseMessage]) -> str:
+        """
+        Generate a dynamic paragraph explaining that this is a cryptocurrency bot, not a general-purpose chatbot.
+        Uses LLM to create context-aware, natural-sounding explanations.
+        
+        Args:
+            messages: Conversation history for context
+            
+        Returns:
+            A paragraph explaining the bot's specialization
+        """
+        try:
+            # Use the intent classifier's LLM (smaller, faster model) for this
+            specialization_llm = ChatGroq(
+                model=getattr(config, 'GROQ_INTENT_CLASSIFIER_MODEL', None) or "llama-3.1-8b-instant",
+                temperature=0.7,
+                max_tokens=150,
+                api_key=config.GROQ_API_KEY
+            )
+            
+            # Get recent context (last 3 messages) for context-aware generation
+            recent_context = messages[-3:] if len(messages) >= 3 else messages
+            context_text = ""
+            if recent_context:
+                context_parts = []
+                for msg in recent_context:
+                    if hasattr(msg, 'content') and msg.content:
+                        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+                        content = msg.content[:100]  # Limit length
+                        context_parts.append(f"{role}: {content}")
+                if context_parts:
+                    context_text = "\n".join(context_parts)
+            
+            prompt = f"""Generate a natural, friendly paragraph (2-3 sentences) explaining that you are a specialized cryptocurrency analysis assistant, not a general-purpose chatbot.
+
+**Context (recent conversation)**:
+{context_text if context_text else "No recent context"}
+
+**Instructions**:
+- Explain that you specialize in cryptocurrency analysis
+- Mention that you're focused on crypto, not general topics
+- Keep it natural, friendly, and not dismissive
+- Make it context-aware based on the conversation if relevant
+- 2-3 sentences maximum
+
+**Example**:
+"I'm a specialized cryptocurrency analysis assistant designed to help with crypto markets, token analysis, and blockchain insights. While I can't assist with general topics, I'm here to provide comprehensive crypto analysis including price trends, technical indicators, sentiment analysis, and more."
+
+Generate ONLY the paragraph, no additional text or explanations."""
+
+            response = specialization_llm.invoke([SystemMessage(content=prompt)])
+            paragraph = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            
+            # Clean up if LLM added extra text
+            if paragraph.startswith('"') and paragraph.endswith('"'):
+                paragraph = paragraph[1:-1]
+            
+            return paragraph
+            
+        except Exception as e:
+            logger.error(f"Error generating specialization paragraph: {e}", exc_info=True)
+            # Fallback to a default paragraph
+            return (
+                "I'm a specialized cryptocurrency analysis assistant designed to help with crypto markets, "
+                "token analysis, and blockchain insights. While I can't assist with general topics, "
+                "I'm here to provide comprehensive crypto analysis including price trends, technical indicators, "
+                "sentiment analysis, and more."
+            )
+    
     def _handle_off_topic_with_history(self, messages: List[BaseMessage]) -> str:
         """
         Handle off-topic requests using LLM with full conversation history.
@@ -1212,11 +1343,16 @@ Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive
                 api_key=config.GROQ_API_KEY
             )
             
+            # Generate a dynamic paragraph about being a cryptocurrency bot using LLM
+            specialization_paragraph = self._generate_specialization_paragraph(messages)
+            
             # Build messages list with system prompt and conversation history
             conversation_messages = [
-                SystemMessage(content="""You are a cryptocurrency analysis assistant. The user has asked something that's not related to cryptocurrency.
+                SystemMessage(content=f"""You are a cryptocurrency analysis assistant. The user has asked something that's not related to cryptocurrency.
 
-Respond politely and naturally. Briefly explain that you specialize in cryptocurrency analysis, mention what you can help with (token analysis, price trends, technical indicators, sentiment, comparisons), and gently redirect them to crypto-related questions.
+{specialization_paragraph}
+
+Respond politely and naturally. Use the specialization paragraph above to explain your focus, mention what you can help with (token analysis, price trends, technical indicators, sentiment, comparisons), and gently redirect them to crypto-related questions.
 
 Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive or rude. Use the conversation history to provide context-aware responses.""")
             ]

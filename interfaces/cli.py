@@ -187,7 +187,8 @@ def run_cli(verbose: bool = False, session_id: Optional[str] = None):
     Main entry point for CLI interface.
     
     Args:
-        verbose: If True, show INFO logs in console. If False, only show WARNING/ERROR.
+        verbose: If True, show INFO/WARNING/ERROR logs in console. If False, only show ERROR (production mode).
+                 All logs (INFO/WARNING/ERROR) are always written to chatbot.log file.
     """
     file_handler = setup_logging(verbose=verbose, enable_console=True)
     
@@ -198,9 +199,9 @@ def run_cli(verbose: bool = False, session_id: Optional[str] = None):
         console.print("\n[bold cyan]Initializing chatbot...[/bold cyan]")
         if verbose:
             console.print("[dim]Verbose mode enabled - detailed API logs will be shown[/dim]")
-            logger.info("🔊 Verbose logging enabled - You will see all INFO level logs in console")
+            logger.info("🔊 Verbose logging enabled - You will see all INFO/WARNING/ERROR logs in console")
         else:
-            logger.info("🔇 Production mode - Console shows only warnings/errors (all logs saved to chatbot.log)")
+            logger.info("🔇 Production mode - Console shows only ERROR level (all logs including WARNING saved to chatbot.log)")
         
         default_user_id = os.getenv("CLI_USER_ID", "cli_user")
         chatbot = CryptoChatbot(user_id=default_user_id, session_id=session_id)

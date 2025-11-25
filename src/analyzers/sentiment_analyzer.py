@@ -1,13 +1,11 @@
 """
 Sentiment Analysis Module
-Analyzes social media sentiment, news sentiment, community engagement, and Fear & Greed Index.
+Analyzes news sentiment, community engagement, and Fear & Greed Index.
 """
 
 from typing import Dict, Any, Optional
 import logging
-from src.data_sources.lunarcrush_client import LunarCrushClient
 from src.data_sources.cryptopanic_client import CryptoPanicClient
-from src.data_sources.messari_client import MessariClient
 from src.data_sources.fear_greed_client import FearGreedClient
 from src.data_sources.coingecko_client import CoinGeckoClient
 
@@ -19,27 +17,21 @@ class SentimentAnalyzer:
     
     def __init__(
         self,
-        lunarcrush_client: Optional[LunarCrushClient] = None,
         cryptopanic_client: Optional[CryptoPanicClient] = None,
         fear_greed_client: Optional[FearGreedClient] = None,
-        coingecko_client: Optional[CoinGeckoClient] = None,
-        messari_client: Optional[MessariClient] = None
+        coingecko_client: Optional[CoinGeckoClient] = None
     ):
         """
         Initialize Sentiment Analyzer.
         
         Args:
-            lunarcrush_client: LunarCrush API client
-            cryptopanic_client: CryptoPanic API client
-            fear_greed_client: Fear & Greed Index client
-            coingecko_client: CoinGecko API client
-            messari_client: Messari API client
+            cryptopanic_client: CryptoPanic API client (for news sentiment)
+            fear_greed_client: Fear & Greed Index client (for market mood + global context)
+            coingecko_client: CoinGecko API client (for community data)
         """
-        self.lunarcrush = lunarcrush_client
         self.cryptopanic = cryptopanic_client
         self.fear_greed = fear_greed_client
         self.coingecko = coingecko_client
-        self.messari = messari_client
     
     def analyze(self, symbol: str) -> Dict[str, Any]:
         """
@@ -52,15 +44,24 @@ class SentimentAnalyzer:
             dict: Sentiment analysis results
         """
         try:
+            logger.info(f"🔍 [SentimentAnalyzer] Starting analysis for {symbol}")
+            
             # Gather sentiment data from available sources
-            social_sentiment = self._get_social_sentiment(symbol)
             news_sentiment = self._get_news_sentiment(symbol)
             fear_greed = self._get_fear_greed_index()
             community_data = self._get_community_data(symbol)
+            market_context = self._get_market_context()  # NEW: Global market context
+            
+            # Log data source results
+            sources_used = []
+            if news_sentiment.get("available"): sources_used.append("CryptoPanic")
+            if fear_greed.get("available"): sources_used.append("Fear & Greed Index")
+            if community_data.get("available"): sources_used.append("CoinGecko Community")
+            if market_context.get("available"): sources_used.append("Alternative.me Global")
+            logger.info(f"📊 [SentimentAnalyzer] Data sources used: {', '.join(sources_used) if sources_used else 'None'}")
             
             # Aggregate sentiment
             overall_sentiment = self._aggregate_sentiment(
-                social_sentiment,
                 news_sentiment,
                 fear_greed
             )
@@ -68,75 +69,61 @@ class SentimentAnalyzer:
             # Generate analysis
             analysis = {
                 "symbol": symbol.upper(),
-                "social_sentiment": social_sentiment,
                 "news_sentiment": news_sentiment,
                 "fear_greed_index": fear_greed,
                 "community_data": community_data,
+                "market_context": market_context,  # NEW: Add market context
                 "overall_sentiment": overall_sentiment,
                 "summary": self._generate_summary(
                     symbol,
-                    social_sentiment,
                     news_sentiment,
                     fear_greed,
                     overall_sentiment
                 ),
             }
             
+            logger.info(f"✅ [SentimentAnalyzer] Analysis completed for {symbol}")
             return analysis
             
         except Exception as e:
-            logger.error(f"Sentiment analysis failed for {symbol}: {e}")
+            logger.error(f"❌ [SentimentAnalyzer] Analysis failed for {symbol}: {e}")
             raise
     
-    def _get_social_sentiment(self, symbol: str) -> Dict[str, Any]:
-        """Get social media sentiment from LunarCrush."""
-        if not self.lunarcrush:
-            return {"available": False, "note": "LunarCrush data not available"}
-        
-        try:
-            data = self.lunarcrush.get_token_data(symbol)
-            
-            galaxy_score = data.get("galaxy_score")
-            alt_rank = data.get("alt_rank")
-            sentiment = data.get("sentiment")
-            social_volume = data.get("social_volume")
-            social_dominance = data.get("social_dominance")
-            
-            # Interpret sentiment
-            sentiment_label = "Neutral"
-            if sentiment and sentiment > 3.5:
-                sentiment_label = "Positive"
-            elif sentiment and sentiment < 2.5:
-                sentiment_label = "Negative"
-            
-            return {
-                "available": True,
-                "galaxy_score": galaxy_score,  # 0-100 scale
-                "alt_rank": alt_rank,
-                "sentiment_score": sentiment,  # 1-5 scale
-                "sentiment_label": sentiment_label,
-                "social_volume": social_volume,
-                "social_dominance": social_dominance,
-                "interpretation": self._interpret_social_sentiment(galaxy_score, sentiment),
-            }
-            
-        except Exception as e:
-            logger.warning(f"LunarCrush sentiment fetch failed: {e}")
-            return {"available": False, "error": str(e)}
-    
     def _get_news_sentiment(self, symbol: str) -> Dict[str, Any]:
-        """Get news sentiment from CryptoPanic."""
-        if not self.cryptopanic:
-            return {"available": False, "note": "CryptoPanic data not available"}
+        """
+        Get news sentiment from CryptoPanic.
         
-        try:
-            data = self.cryptopanic.get_token_data(symbol)
-            
-            sentiment_dist = data.get("sentiment_distribution", {})
-            total = data.get("news_count", 0)
+        ⚠️ Note: Messari news feed is not available in free tier.
+        """
+        cryptopanic_data = None
+        
+        # Try CryptoPanic
+        if self.cryptopanic:
+            try:
+                cryptopanic_data = self.cryptopanic.get_token_data(symbol)
+            except Exception as e:
+                logger.warning(f"CryptoPanic sentiment fetch failed: {e}")
+        
+        # If no source available
+        if not cryptopanic_data:
+            return {"available": False, "note": "News data not available"}
+        
+        # Process CryptoPanic data
+        result = {"available": True}
+        
+        if cryptopanic_data:
+            sentiment_dist = cryptopanic_data.get("sentiment_distribution", {})
+            total = cryptopanic_data.get("news_count", 0)
             
             positive_pct = sentiment_dist.get("positive_pct", 0)
             negative_pct = sentiment_dist.get("negative_pct", 0)
+            neutral_pct = sentiment_dist.get("neutral_pct", 0)
+            
+            # Get panic score (v2 API feature)
+            avg_panic_score = cryptopanic_data.get("average_panic_score")
+            
+            # Get detailed votes (v2 API feature)
+            total_votes = cryptopanic_data.get("total_votes", {})
             
             # Determine overall news sentiment
             if positive_pct > 60:
@@ -146,29 +133,51 @@ class SentimentAnalyzer:
             else:
                 overall = "Negative"
             
-            return {
-                "available": True,
+            # Interpret panic score
+            panic_interpretation = self._interpret_panic_score(avg_panic_score)
+            
+            result.update({
                 "total_articles": total,
                 "positive_count": sentiment_dist.get("positive", 0),
                 "negative_count": sentiment_dist.get("negative", 0),
                 "neutral_count": sentiment_dist.get("neutral", 0),
                 "positive_percentage": positive_pct,
                 "negative_percentage": negative_pct,
+                "neutral_percentage": neutral_pct,
                 "overall_sentiment": overall,
+                
+                # v2 API: Panic Score (market impact)
+                "panic_score": avg_panic_score,
+                "panic_interpretation": panic_interpretation,
+                
+                # v2 API: Detailed community votes
+                "community_votes": {
+                    "positive": total_votes.get("positive", 0),
+                    "negative": total_votes.get("negative", 0),
+                    "important": total_votes.get("important", 0),
+                    "liked": total_votes.get("liked", 0),
+                    "disliked": total_votes.get("disliked", 0),
+                    "lol": total_votes.get("lol", 0),
+                    "toxic": total_votes.get("toxic", 0),
+                    "saved": total_votes.get("saved", 0),
+                    "comments": total_votes.get("comments", 0),
+                },
+                
                 "recent_headlines": [
                     {
                         "title": article.get("title"),
                         "published_at": article.get("published_at"),
+                        "source": "CryptoPanic",
+                        "url": article.get("url"),
+                        "panic_score": article.get("panic_score"),
                         "votes": article.get("votes", {}),
                     }
-                    for article in data.get("recent_news", [])[:3]
+                    for article in cryptopanic_data.get("recent_news", [])[:3]
                 ],
-                "interpretation": self._interpret_news_sentiment(positive_pct, negative_pct),
-            }
-            
-        except Exception as e:
-            logger.warning(f"CryptoPanic sentiment fetch failed: {e}")
-            return {"available": False, "error": str(e)}
+                "interpretation": self._interpret_news_sentiment(positive_pct, negative_pct, avg_panic_score),
+            })
+        
+        return result
     
     def _get_fear_greed_index(self) -> Dict[str, Any]:
         """Get market-wide Fear & Greed Index."""
@@ -214,40 +223,96 @@ class SentimentAnalyzer:
             logger.warning(f"Community data fetch failed: {e}")
             return {"available": False, "error": str(e)}
     
-    def _interpret_social_sentiment(
-        self, 
-        galaxy_score: Optional[float], 
-        sentiment: Optional[float]
-    ) -> str:
-        """Interpret LunarCrush social sentiment."""
-        if not galaxy_score or not sentiment:
-            return "Unable to assess social sentiment"
+    def _get_market_context(self) -> Dict[str, Any]:
+        """
+        Get global market context from Alternative.me.
         
-        if galaxy_score > 75 and sentiment > 3.5:
-            return "Very strong social engagement with positive sentiment"
-        elif galaxy_score > 60 and sentiment > 3:
-            return "Strong social presence with generally positive sentiment"
-        elif galaxy_score > 40:
-            return "Moderate social engagement with neutral sentiment"
+        ⚡ Provides useful context like BTC dominance and total market cap.
+        Helps understand if sentiment is token-specific or market-wide.
+        """
+        if not self.fear_greed:
+            return {"available": False, "note": "Global market context not available"}
+        
+        try:
+            global_data = self.fear_greed.get_global_data()
+            
+            return {
+                "available": True,
+                "total_market_cap": global_data.get("total_market_cap"),
+                "total_volume_24h": global_data.get("total_volume_24h"),
+                "bitcoin_dominance": global_data.get("bitcoin_dominance"),
+                "active_cryptocurrencies": global_data.get("active_cryptocurrencies"),
+                "active_markets": global_data.get("active_markets"),
+                "interpretation": self._interpret_market_context(global_data.get("bitcoin_dominance")),
+            }
+            
+        except Exception as e:
+            logger.warning(f"Global market context fetch failed: {e}")
+            return {"available": False, "error": str(e)}
+    
+    def _interpret_market_context(self, btc_dominance: Optional[float]) -> str:
+        """Interpret market context based on BTC dominance."""
+        if not btc_dominance:
+            return "Unable to assess market context"
+        
+        if btc_dominance > 60:
+            return "Very high BTC dominance - Market is risk-off, favoring Bitcoin"
+        elif btc_dominance > 50:
+            return "High BTC dominance - Conservative market sentiment"
+        elif btc_dominance > 40:
+            return "Moderate BTC dominance - Balanced market"
         else:
-            return "Low social engagement or negative sentiment"
+            return "Low BTC dominance - Altcoin season, risk-on sentiment"
     
     def _interpret_news_sentiment(
         self, 
         positive_pct: float, 
-        negative_pct: float
+        negative_pct: float,
+        panic_score: Optional[float] = None
     ) -> str:
-        """Interpret news sentiment."""
+        """Interpret news sentiment with optional panic score."""
+        base_interpretation = ""
+        
         if positive_pct > 70:
-            return "Overwhelmingly positive news coverage"
+            base_interpretation = "Overwhelmingly positive news coverage"
         elif positive_pct > 55:
-            return "Mostly positive news coverage"
+            base_interpretation = "Mostly positive news coverage"
         elif positive_pct > 45:
-            return "Balanced news coverage"
+            base_interpretation = "Balanced news coverage"
         elif positive_pct > 30:
-            return "Mostly negative news coverage"
+            base_interpretation = "Mostly negative news coverage"
         else:
-            return "Predominantly negative news coverage"
+            base_interpretation = "Predominantly negative news coverage"
+        
+        # Add panic score context if available
+        if panic_score is not None:
+            if panic_score > 70:
+                base_interpretation += ". Very high market impact - major news event"
+            elif panic_score > 50:
+                base_interpretation += ". Significant market impact"
+            elif panic_score > 30:
+                base_interpretation += ". Moderate market attention"
+        
+        return base_interpretation
+    
+    def _interpret_panic_score(self, panic_score: Optional[float]) -> str:
+        """
+        Interpret CryptoPanic's panic score (0-100).
+        Higher scores indicate greater market impact and importance.
+        """
+        if panic_score is None:
+            return "No panic score data available"
+        
+        if panic_score >= 80:
+            return "Extremely high market impact - Breaking news with massive attention"
+        elif panic_score >= 60:
+            return "High market impact - Significant news driving discussion"
+        elif panic_score >= 40:
+            return "Moderate market impact - Notable news with community interest"
+        elif panic_score >= 20:
+            return "Low market impact - Minor news or limited attention"
+        else:
+            return "Very low market impact - Minimal community engagement"
     
     def _interpret_community_data(self, community: Dict[str, Any]) -> str:
         """Interpret community engagement."""
@@ -267,19 +332,11 @@ class SentimentAnalyzer:
     
     def _aggregate_sentiment(
         self,
-        social: Dict[str, Any],
         news: Dict[str, Any],
         fear_greed: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Aggregate sentiment from all sources."""
         sentiment_scores = []
-        
-        # Social sentiment (convert to 0-100 scale)
-        if social.get("available"):
-            sentiment_score = social.get("sentiment_score", 3)
-            # Convert 1-5 scale to 0-100
-            normalized = ((sentiment_score - 1) / 4) * 100
-            sentiment_scores.append(normalized)
         
         # News sentiment
         if news.get("available"):
@@ -340,7 +397,6 @@ class SentimentAnalyzer:
     def _generate_summary(
         self,
         symbol: str,
-        social: Dict[str, Any],
         news: Dict[str, Any],
         fear_greed: Dict[str, Any],
         overall: Dict[str, Any]
@@ -355,12 +411,6 @@ class SentimentAnalyzer:
             f"Overall market sentiment for {symbol.upper()} is {overall_label} "
             f"(score: {overall_score}/100)"
         )
-        
-        # Social sentiment
-        if social.get("available"):
-            galaxy_score = social.get("galaxy_score")
-            if galaxy_score:
-                summary_parts.append(f"Social metrics show a Galaxy Score of {galaxy_score}/100")
         
         # News sentiment
         if news.get("available"):

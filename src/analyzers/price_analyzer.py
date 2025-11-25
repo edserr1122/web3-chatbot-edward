@@ -20,7 +20,9 @@ class PriceAnalyzer:
     def __init__(
         self,
         coingecko_client: Optional[CoinGeckoClient] = None,
-        coinmarketcap_client: Optional[CoinMarketCapClient] = None
+        coinmarketcap_client: Optional[CoinMarketCapClient] = None,
+        coincap_client: Optional[Any] = None,  # CoinCapClient - fallback for historical data
+        binance_clients: Optional[List[Any]] = None  # Ordered Binance clients (global first, then US)
     ):
         """
         Initialize Price Analyzer.
@@ -28,9 +30,13 @@ class PriceAnalyzer:
         Args:
             coingecko_client: CoinGecko API client
             coinmarketcap_client: CoinMarketCap API client
+            coincap_client: CoinCap API client (fallback for historical data)
+            binance_client: Binance API client (fallback for historical data)
         """
         self.coingecko = coingecko_client
         self.coinmarketcap = coinmarketcap_client
+        self.coincap = coincap_client
+        self.binance_clients = binance_clients or []
     
     def analyze(self, symbol: str) -> Dict[str, Any]:
         """
@@ -43,11 +49,18 @@ class PriceAnalyzer:
             dict: Price analysis results
         """
         try:
-            # Get current price data
+            logger.info(f"🔍 [PriceAnalyzer] Starting analysis for {symbol}")
+            
+            # Get current price data (prefer CMC)
             current_data = self._get_current_price_data(symbol)
             
-            # Get historical data
-            historical_data = self._get_historical_data(symbol, days=30)
+            # Get historical data with fallback tracking
+            historical_data, hist_source = self._get_historical_data(symbol, days=30)
+            
+            # Log data sources used
+            price_source = "CoinMarketCap" if self.coinmarketcap else "CoinGecko"
+            chart_source = hist_source if hist_source else "None (unavailable)"
+            logger.info(f"📊 [PriceAnalyzer] Data sources used: {price_source} (current prices), {chart_source} (historical chart)")
             
             # Analyze price trends
             trends = self._analyze_trends(current_data, historical_data)
@@ -68,41 +81,104 @@ class PriceAnalyzer:
                 "support_resistance": support_resistance,
                 "ath_atl": self._analyze_ath_atl(current_data),
                 "summary": self._generate_summary(current_data, trends, volatility),
+                "data_availability": {
+                    "current_price": True,
+                    "historical_data": historical_data is not None,
+                    "historical_source": hist_source if hist_source else "unavailable"
+                }
             }
+            
+            # Add warning if historical data is missing
+            if not historical_data:
+                analysis["data_limitation_warning"] = (
+                    "⚠️  Historical data unavailable - volatility and support/resistance analysis limited. "
+                    "This may be due to API rate limits, network issues, or the token not being listed on available exchanges."
+                )
+                logger.warning(f"   ⚠️  [PriceAnalyzer] Analysis completed for {symbol} with LIMITED data (no historical data)")
+            else:
+                logger.info(f"✅ [PriceAnalyzer] Analysis completed for {symbol}")
             
             return analysis
             
         except Exception as e:
-            logger.error(f"Price analysis failed for {symbol}: {e}")
+            logger.error(f"❌ [PriceAnalyzer] Analysis failed for {symbol}: {e}")
             raise
     
     def _get_current_price_data(self, symbol: str) -> Dict[str, Any]:
-        """Get current price data."""
-        # Try CoinGecko first
-        if self.coingecko:
-            try:
-                return self.coingecko.get_token_data(symbol)
-            except Exception as e:
-                logger.warning(f"CoinGecko fetch failed: {e}")
+        """
+        Get current price data.
         
-        # Fallback to CoinMarketCap
+        ⚡ STRATEGY: Prefer CoinMarketCap for current price data because:
+        - CMC provides more price change timeframes (1h, 24h, 7d, 30d, 60d, 90d)
+        - CoinGecko only provides (24h, 7d, 30d)
+        - CMC has market dominance and better ranking data
+        """
+        # Try CoinMarketCap FIRST (better for price changes)
         if self.coinmarketcap:
             try:
+                logger.info(f"   📊 [PriceAnalyzer] Fetching current price from CoinMarketCap (preferred)")
                 return self.coinmarketcap.get_token_data(symbol)
             except Exception as e:
-                logger.warning(f"CoinMarketCap fetch failed: {e}")
+                logger.warning(f"   ⚠️  CoinMarketCap fetch failed: {e}")
+        
+        # Fallback to CoinGecko
+        if self.coingecko:
+            try:
+                logger.info(f"   📊 [PriceAnalyzer] Fetching current price from CoinGecko (fallback)")
+                return self.coingecko.get_token_data(symbol)
+            except Exception as e:
+                logger.warning(f"   ⚠️  CoinGecko fetch failed: {e}")
         
         raise Exception("No price data available from any source")
     
-    def _get_historical_data(self, symbol: str, days: int = 30) -> Optional[Dict[str, Any]]:
-        """Get historical price data."""
+    def _get_historical_data(self, symbol: str, days: int = 30) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Get historical price data with multi-level fallback.
+        
+        Priority: CoinGecko → CoinCap → Binance
+        
+        Returns:
+            tuple: (historical_data, source_name) where source_name is the API that provided data
+        """
+        historical_data = None
+        source_name = None
+        
+        # Try CoinGecko first
         if self.coingecko:
             try:
-                return self.coingecko.get_market_chart(symbol, days=days)
+                historical_data = self.coingecko.get_market_chart(symbol, days=days)
+                if historical_data and historical_data.get("prices"):
+                    logger.info(f"   ✅ [CoinGecko] Historical data retrieved ({len(historical_data.get('prices', []))} data points)")
+                    return historical_data, "CoinGecko"
             except Exception as e:
-                logger.warning(f"Historical data fetch failed: {e}")
+                logger.warning(f"   ⚠️  [CoinGecko] Historical data fetch failed: {e}")
         
-        return None
+        # Fallback to CoinCap
+        if not historical_data and self.coincap:
+            try:
+                logger.info(f"   🔄 [CoinCap] Using fallback for historical data")
+                historical_data = self.coincap.get_market_chart(symbol, days=days)
+                if historical_data and historical_data.get("prices"):
+                    logger.info(f"   ✅ [CoinCap] Historical data retrieved ({len(historical_data.get('prices', []))} data points)")
+                    return historical_data, "CoinCap"
+            except Exception as e:
+                logger.warning(f"   ⚠️  [CoinCap] Historical data fetch failed: {e}")
+        
+        # Fallback to Binance (global first, then US)
+        if not historical_data and self.binance_clients:
+            for binance_client in self.binance_clients:
+                binance_name = binance_client.__class__.__name__.replace("Client", "")
+                try:
+                    logger.info(f"   🔄 [{binance_name}] Using fallback for historical data")
+                    historical_data = binance_client.get_market_chart(symbol, days=days)
+                    if historical_data and historical_data.get("prices"):
+                        logger.info(f"   ✅ [{binance_name}] Historical data retrieved ({len(historical_data.get('prices', []))} data points)")
+                        return historical_data, binance_name
+                except Exception as e:
+                    logger.warning(f"   ⚠️  [{binance_name}] Historical data fetch failed: {e}")
+        
+        logger.error(f"   ❌ [PriceAnalyzer] No historical data available from any source for {symbol}")
+        return None, None
     
     def _extract_price_changes(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract price change percentages."""
@@ -246,7 +322,11 @@ class PriceAnalyzer:
         if not historical_data or "prices" not in historical_data or not current_price:
             return {"support": None, "resistance": None, "note": "Insufficient data"}
         
-        prices = [p[1] for p in historical_data.get("prices", [])]
+        prices = [p[1] for p in historical_data.get("prices", []) if len(p) >= 2]
+        
+        # Check if we have enough price data
+        if not prices or len(prices) < 2:
+            return {"support": None, "resistance": None, "note": "Insufficient historical price data"}
         
         # Simple support/resistance based on recent highs and lows
         recent_high = max(prices)

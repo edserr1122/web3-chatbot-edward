@@ -16,7 +16,6 @@ from src.analyzers import (
 from src.data_sources import (
     CoinGeckoClient,
     CoinMarketCapClient,
-    LunarCrushClient,
     CryptoPanicClient,
     MessariClient,
     FearGreedClient,
@@ -59,6 +58,58 @@ class CryptoChatbot:
         self.coingecko = CoinGeckoClient(config.COINGECKO_API_KEY)
         logger.info("  ✓ CoinGecko client initialized")
         
+        # CoinCap (requires API key - fallback for historical data)
+        from src.data_sources import CoinCapClient
+        self.coincap = None
+        if config.COINCAP_API_KEY:
+            try:
+                self.coincap = CoinCapClient(config.COINCAP_API_KEY)
+                # Test connection
+                if self.coincap.test_connection():
+                    logger.info("  ✓ CoinCap client initialized (fallback for historical data)")
+                else:
+                    self.coincap = None
+                    logger.warning("  ⚠️ CoinCap API connection failed - check your API key")
+            except Exception as e:
+                logger.warning(f"  ⚠️ CoinCap initialization failed: {e}")
+                self.coincap = None
+        else:
+            logger.info("  ℹ️  CoinCap API key not configured - skipping (fallback unavailable)")
+        
+        # Binance (free, no API key required - preferred source for OHLC data)
+        # Try Binance global first (richer data), then Binance.US for geo-restricted regions
+        from src.data_sources import BinanceClient, BinanceUSClient
+        self.binance_clients = []
+        self.binance_global = None
+        self.binance_us = None
+        
+        # Binance (global) first
+        try:
+            binance_global = BinanceClient()
+            if binance_global.test_connection():
+                self.binance_global = binance_global
+                self.binance_clients.append(binance_global)
+                logger.info("  ✓ Binance (global) client initialized (primary OHLC source)")
+            else:
+                logger.warning("  ⚠️ Binance (global) connection failed")
+        except Exception as e:
+            logger.warning(f"  ⚠️ Binance (global) not available: {e}")
+        
+        # Binance.US second
+        try:
+            binance_us = BinanceUSClient()
+            if binance_us.test_connection():
+                self.binance_us = binance_us
+                self.binance_clients.append(binance_us)
+                logger.info("  ✓ Binance.US client initialized (secondary OHLC source)")
+            else:
+                logger.warning("  ⚠️ Binance.US connection failed")
+        except Exception as e:
+            logger.warning(f"  ⚠️ Binance.US not available: {e}")
+        
+        if not self.binance_clients:
+            logger.warning("  ⚠️ No Binance client available (global and US failed) - will rely on CoinGecko/CoinCap")
+        
         # CoinMarketCap (optional)
         self.coinmarketcap = None
         if config.COINMARKETCAP_API_KEY:
@@ -67,15 +118,6 @@ class CryptoChatbot:
                 logger.info("  ✓ CoinMarketCap client initialized")
             except Exception as e:
                 logger.warning(f"  ⚠️ CoinMarketCap initialization failed: {e}")
-        
-        # LunarCrush (optional)
-        self.lunarcrush = None
-        if config.LUNARCRUSH_API_KEY:
-            try:
-                self.lunarcrush = LunarCrushClient(config.LUNARCRUSH_API_KEY)
-                logger.info("  ✓ LunarCrush client initialized")
-            except Exception as e:
-                logger.warning(f"  ⚠️ LunarCrush initialization failed: {e}")
         
         # CryptoPanic (optional)
         self.cryptopanic = None
@@ -103,43 +145,51 @@ class CryptoChatbot:
         """Initialize all analyzer modules."""
         logger.info("Initializing analyzers...")
         
-        # Fundamental Analyzer
+        # Fundamental Analyzer (with global market context)
         self.fundamental_analyzer = FundamentalAnalyzer(
             coingecko_client=self.coingecko,
             coinmarketcap_client=self.coinmarketcap,
-            messari_client=self.messari
+            messari_client=self.messari,
+            cryptopanic_client=self.cryptopanic,
+            alternative_client=self.fear_greed  # Global market context
         )
         logger.info("  ✓ Fundamental analyzer initialized")
         
-        # Price Analyzer
+        # Price Analyzer (with fallbacks for historical data)
         self.price_analyzer = PriceAnalyzer(
             coingecko_client=self.coingecko,
-            coinmarketcap_client=self.coinmarketcap
+            coinmarketcap_client=self.coinmarketcap,
+            coincap_client=self.coincap,  # Fallback for historical data
+            binance_clients=self.binance_clients  # Fallback for historical data
         )
         logger.info("  ✓ Price analyzer initialized")
         
-        # Technical Analyzer
+        # Technical Analyzer (CoinGecko + Binance fallback for OHLC)
         self.technical_analyzer = TechnicalAnalyzer(
-            coingecko_client=self.coingecko
+            coingecko_client=self.coingecko,
+            binance_clients=self.binance_clients,  # Binance (global → US)
+            coincap_client=self.coincap  # Final fallback via TA endpoints
         )
         logger.info("  ✓ Technical analyzer initialized")
         
-        # Sentiment Analyzer
+        # Sentiment Analyzer (news + market mood + community)
         self.sentiment_analyzer = SentimentAnalyzer(
-            lunarcrush_client=self.lunarcrush,
             cryptopanic_client=self.cryptopanic,
             fear_greed_client=self.fear_greed,
-            coingecko_client=self.coingecko,
-            messari_client=self.messari
+            coingecko_client=self.coingecko
         )
         logger.info("  ✓ Sentiment analyzer initialized")
         
-        # Comparative Analyzer
+        # Comparative Analyzer (with CoinGecko & CoinMarketCap clients for optimized batch fetching)
         self.comparative_analyzer = ComparativeAnalyzer(
             fundamental_analyzer=self.fundamental_analyzer,
             price_analyzer=self.price_analyzer,
             technical_analyzer=self.technical_analyzer,
-            sentiment_analyzer=self.sentiment_analyzer
+            sentiment_analyzer=self.sentiment_analyzer,
+            coingecko_client=self.coingecko,  # Enable optimized batch API calls
+            coinmarketcap_client=self.coinmarketcap,  # Enable CoinMarketCap batch calls
+            coincap_client=self.coincap,  # Fallback 1 for historical data
+            binance_clients=self.binance_clients  # Fallback 2 for historical data
         )
         logger.info("  ✓ Comparative analyzer initialized")
     
@@ -217,7 +267,7 @@ class CryptoChatbot:
         print("  ✓ Fundamental Analysis (Market cap, supply, volume)")
         print("  ✓ Price Analysis (Trends, volatility, support/resistance)")
         print("  ✓ Technical Analysis (RSI, MACD, Moving Averages)")
-        print("  ✓ Sentiment Analysis (Social, news, Fear & Greed)")
+        print("  ✓ Sentiment Analysis (News, Fear & Greed, Community)")
         print("  ✓ Comparative Analysis (Multi-token comparison)")
         print("=" * 70 + "\n")
 

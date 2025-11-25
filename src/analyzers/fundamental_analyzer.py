@@ -8,6 +8,8 @@ import logging
 from src.data_sources.coingecko_client import CoinGeckoClient
 from src.data_sources.coinmarketcap_client import CoinMarketCapClient
 from src.data_sources.messari_client import MessariClient
+from src.data_sources.cryptopanic_client import CryptoPanicClient
+from src.data_sources.fear_greed_client import FearGreedClient
 from src.utils.formatters import OutputFormatter
 
 logger = logging.getLogger(__name__)
@@ -20,7 +22,9 @@ class FundamentalAnalyzer:
         self,
         coingecko_client: Optional[CoinGeckoClient] = None,
         coinmarketcap_client: Optional[CoinMarketCapClient] = None,
-        messari_client: Optional[MessariClient] = None
+        messari_client: Optional[MessariClient] = None,
+        cryptopanic_client: Optional[CryptoPanicClient] = None,
+        alternative_client: Optional[FearGreedClient] = None
     ):
         """
         Initialize Fundamental Analyzer.
@@ -29,10 +33,14 @@ class FundamentalAnalyzer:
             coingecko_client: CoinGecko API client
             coinmarketcap_client: CoinMarketCap API client
             messari_client: Messari API client
+            cryptopanic_client: CryptoPanic API client (for major news events)
+            alternative_client: Alternative.me client (for global market context)
         """
         self.coingecko = coingecko_client
         self.coinmarketcap = coinmarketcap_client
         self.messari = messari_client
+        self.cryptopanic = cryptopanic_client
+        self.alternative = alternative_client
         
     def analyze(self, symbol: str) -> Dict[str, Any]:
         """
@@ -45,13 +53,30 @@ class FundamentalAnalyzer:
             dict: Fundamental analysis results
         """
         try:
+            logger.info(f"🔍 [FundamentalAnalyzer] Starting analysis for {symbol}")
+            
             # Gather data from available sources
             cg_data = self._get_coingecko_data(symbol)
             cmc_data = self._get_coinmarketcap_data(symbol)
             messari_data = self._get_messari_data(symbol)
             
+            # Log data source results
+            sources_used = []
+            if cg_data: sources_used.append("CoinGecko")
+            if cmc_data: sources_used.append("CoinMarketCap")
+            if messari_data: sources_used.append("Messari")
+            if self.alternative: sources_used.append("Alternative.me (global context)")
+            if self.cryptopanic: sources_used.append("CryptoPanic (news)")
+            logger.info(f"📊 [FundamentalAnalyzer] Data sources used: {', '.join(sources_used) if sources_used else 'None'}")
+            
             # Merge and analyze data
             merged_data = self._merge_data(cg_data, cmc_data, messari_data)
+            
+            # Get important news that might affect fundamentals
+            important_news = self._get_important_news(symbol)
+            
+            # Get global market context for perspective
+            market_context = self._get_global_market_context()
             
             # Generate analysis
             analysis = {
@@ -61,14 +86,17 @@ class FundamentalAnalyzer:
                 "supply_metrics": self._analyze_supply_metrics(merged_data),
                 "liquidity_metrics": self._analyze_liquidity_metrics(merged_data),
                 "valuation_metrics": self._analyze_valuation_metrics(merged_data),
+                "market_context": market_context,
+                "important_news": important_news,
                 "summary": self._generate_summary(merged_data),
                 "raw_data": merged_data,
             }
             
+            logger.info(f"✅ [FundamentalAnalyzer] Analysis completed for {symbol}")
             return analysis
             
         except Exception as e:
-            logger.error(f"Fundamental analysis failed for {symbol}: {e}")
+            logger.error(f"❌ [FundamentalAnalyzer] Analysis failed for {symbol}: {e}")
             raise
     
     def _get_coingecko_data(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -104,19 +132,129 @@ class FundamentalAnalyzer:
             logger.warning(f"Messari data fetch failed: {e}")
             return None
     
+    def _get_important_news(self, symbol: str) -> Dict[str, Any]:
+        """
+        Get important news that might affect fundamental value.
+        
+        Args:
+            symbol: Token symbol
+            
+        Returns:
+            dict: Important news with high panic scores
+        """
+        if not self.cryptopanic:
+            return {"available": False, "note": "News data not available"}
+        
+        try:
+            # Get important/high-impact news
+            important_news = self.cryptopanic.get_important_news(currencies=symbol)
+            
+            if not important_news:
+                return {"available": True, "count": 0, "articles": []}
+            
+            # Filter for high panic score articles (fundamental impact)
+            high_impact_news = []
+            for article in important_news[:5]:  # Top 5
+                panic_score = article.get("panic_score")
+                if panic_score and panic_score > 40:  # Moderate+ impact
+                    high_impact_news.append({
+                        "title": article.get("title"),
+                        "published_at": article.get("published_at"),
+                        "panic_score": panic_score,
+                        "url": article.get("url"),
+                        "source": article.get("source", {}).get("title"),
+                        "votes": article.get("votes", {}),
+                    })
+            
+            return {
+                "available": True,
+                "count": len(high_impact_news),
+                "articles": high_impact_news,
+                "interpretation": self._interpret_news_impact(high_impact_news),
+            }
+            
+        except Exception as e:
+            logger.warning(f"Important news fetch failed: {e}")
+            return {"available": False, "error": str(e)}
+    
+    def _interpret_news_impact(self, news_articles: list) -> str:
+        """Interpret the impact of recent important news on fundamentals."""
+        if not news_articles:
+            return "No significant fundamental news events recently"
+        
+        avg_panic = sum(a.get("panic_score", 0) for a in news_articles) / len(news_articles)
+        
+        if avg_panic > 70:
+            return "Major fundamental news events - Potential significant impact on valuation"
+        elif avg_panic > 50:
+            return "Notable fundamental developments - Moderate impact expected"
+        else:
+            return "Some important news - Minor to moderate fundamental impact"
+    
+    def _get_global_market_context(self) -> Dict[str, Any]:
+        """
+        Get global market context from Alternative.me.
+        
+        Provides context for understanding token's fundamentals relative to market:
+        - Total crypto market cap (overall market health)
+        - BTC dominance (risk sentiment)
+        - Active cryptocurrencies (competition)
+        """
+        if not self.alternative:
+            return {"available": False, "note": "Global market context not available"}
+        
+        try:
+            global_data = self.alternative.get_global_data()
+            
+            btc_dominance = global_data.get("bitcoin_dominance")
+            total_market_cap = global_data.get("total_market_cap")
+            
+            # Interpret market context for fundamentals
+            interpretation = self._interpret_market_context_fundamentals(btc_dominance)
+            
+            return {
+                "available": True,
+                "total_market_cap": total_market_cap,
+                "total_market_cap_formatted": OutputFormatter.format_large_number(total_market_cap) if total_market_cap else "N/A",
+                "bitcoin_dominance": btc_dominance,
+                "active_cryptocurrencies": global_data.get("active_cryptocurrencies"),
+                "active_markets": global_data.get("active_markets"),
+                "interpretation": interpretation,
+            }
+            
+        except Exception as e:
+            logger.warning(f"Global market context fetch failed: {e}")
+            return {"available": False, "error": str(e)}
+    
+    def _interpret_market_context_fundamentals(self, btc_dominance: Optional[float]) -> str:
+        """Interpret market context from fundamental perspective."""
+        if not btc_dominance:
+            return "Unable to assess market context"
+        
+        if btc_dominance > 60:
+            return "High BTC dominance - Flight to quality, challenging environment for altcoins"
+        elif btc_dominance > 50:
+            return "Moderate-high BTC dominance - Conservative market favoring established projects"
+        elif btc_dominance > 40:
+            return "Balanced BTC dominance - Healthy market for quality altcoin fundamentals"
+        else:
+            return "Low BTC dominance - Risk-on environment, favorable for strong altcoin fundamentals"
+    
     def _merge_data(
         self, 
         cg_data: Optional[Dict], 
         cmc_data: Optional[Dict],
         messari_data: Optional[Dict]
     ) -> Dict[str, Any]:
-        """Merge data from multiple sources."""
+        """
+        Merge data from multiple sources.
+        
+        ⚠️ Messari free tier only provides asset details (no metrics).
+        """
         merged = {}
         
-        # Priority: CoinGecko > CoinMarketCap > Messari
+        # Priority: CoinGecko > CoinMarketCap
         sources = [cg_data, cmc_data]
-        if messari_data:
-            sources.append(messari_data.get("metrics", {}))
         
         for source in sources:
             if source:
@@ -124,9 +262,16 @@ class FundamentalAnalyzer:
                     if value is not None and key not in merged:
                         merged[key] = value
         
-        # Add Messari profile data if available
-        if messari_data and "profile" in messari_data:
-            merged["profile"] = messari_data["profile"]
+        # Add Messari details if available (free tier: details only)
+        if messari_data and "details" in messari_data:
+            details = messari_data["details"]
+            # Merge in Messari-specific fields
+            merged["messari_category"] = details.get("category")
+            merged["messari_sector"] = details.get("sector")
+            merged["messari_tagline"] = details.get("tagline")
+            merged["messari_description"] = details.get("description")
+            merged["messari_tags"] = details.get("tags", [])
+            merged["messari_technology"] = details.get("technology")
         
         return merged
     

@@ -6,6 +6,7 @@ Uses MemorySaver for conversation persistence and modular tool architecture.
 from typing import Dict, Any, List, TypedDict, Annotated
 import logging
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -97,10 +98,10 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         self.validator = InputValidator()
         
         # Initialize LLM
-        self.llm = ChatOpenAI(
-            model=config.OPENAI_MODEL,
+        self.llm = ChatGroq(
+            model=config.GROQ_MODEL,
             temperature=0.7,
-            api_key=config.OPENAI_API_KEY
+            api_key=config.GROQ_API_KEY
         )
         
         # Create tool instances

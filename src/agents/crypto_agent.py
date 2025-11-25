@@ -6,6 +6,7 @@ Uses MemorySaver for conversation persistence and modular tool architecture.
 from typing import Dict, Any, List, TypedDict, Annotated, Optional
 import logging
 import re
+import json
 import uuid
 from datetime import datetime, timedelta
 from langchain_openai import ChatOpenAI
@@ -49,6 +50,9 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     intent: str  # "crypto_analysis", "small_talk", "off_topic", "unknown"
     tokens: List[str]  # Extracted crypto token symbols/names
+    revision_count: int  # Number of revision attempts
+    evaluation_score: float  # Last evaluation score (0.0-1.0)
+    evaluation_feedback: str  # Feedback from evaluator
 
 
 class CryptoAgent:
@@ -120,6 +124,18 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             api_key=config.GROQ_API_KEY
         )
         
+        # Initialize evaluator LLM (smaller, faster model for evaluation)
+        self.evaluator_llm = ChatGroq(
+            model=config.GROQ_INTENT_CLASSIFIER_MODEL,
+            temperature=0.1,  # Low temperature for consistent evaluation
+            max_tokens=200,  # Short evaluation responses
+            api_key=config.GROQ_API_KEY
+        )
+        
+        # Evaluation settings
+        self.evaluation_threshold = config.EVALUATION_THRESHOLD
+        self.max_revisions = config.MAX_REVISIONS
+        
         # Create tool instances
         self.fundamental_tool = FundamentalTool(fundamental_analyzer)
         self.price_tool = PriceTool(price_analyzer)
@@ -169,6 +185,7 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         workflow.add_node("off_topic", self._off_topic_node)
         workflow.add_node("agent", self._call_agent)
         workflow.add_node("tools", ToolNode(self.tools))
+        workflow.add_node("evaluator", self._evaluator_node)
         
         # Add edges
         workflow.set_entry_point("classify_intent")
@@ -189,16 +206,26 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         workflow.add_edge("small_talk", END)
         workflow.add_edge("off_topic", END)
         
-        # Agent routing (tools or end)
+        # Agent routing (tools or evaluator)
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
             {
                 "continue": "tools",
-                "end": END
+                "end": "evaluator"  # Route to evaluator instead of END
             }
         )
         workflow.add_edge("tools", "agent")
+        
+        # Evaluator routing (end if score passes, or back to agent for revision)
+        workflow.add_conditional_edges(
+            "evaluator",
+            self._should_revise,
+            {
+                "pass": END,  # Score >= threshold, return to user
+                "revise": "agent"  # Score < threshold, revise
+            }
+        )
         
         # Compile with memory
         return workflow.compile(checkpointer=self.memory)
@@ -468,6 +495,155 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         # Otherwise, end
         return "end"
     
+    def _evaluator_node(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Evaluate the agent's response for quality (completeness, freshness, relevance).
+        
+        Args:
+            state: Current agent state
+            
+        Returns:
+            Updated state with evaluation_score and evaluation_feedback
+        """
+        messages = state["messages"]
+        
+        # Get the last AI message (the response to evaluate)
+        last_ai_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                last_ai_message = msg
+                break
+        
+        if not last_ai_message or not hasattr(last_ai_message, 'content') or not last_ai_message.content:
+            logger.warning("No AI message found to evaluate, defaulting to passing")
+            return {
+                "evaluation_score": 1.0,
+                "evaluation_feedback": "No response to evaluate"
+            }
+        
+        response_content = last_ai_message.content
+        user_query = ""
+        intent = state.get("intent", "unknown")
+        tokens = state.get("tokens", [])
+        
+        # Get the original user query
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                user_query = msg.content
+                break
+        
+        # Evaluate using LLM
+        evaluation_prompt = f"""You are a quality evaluator for cryptocurrency analysis responses.
+
+Evaluate the following response based on three criteria:
+1. **Completeness**: Is the response complete? Does it end properly without truncation?
+2. **Freshness**: Is the data recent? (Check if response mentions timestamps or data age)
+3. **Relevance**: Does the response address the user's query and intent?
+
+**User Query**: {user_query}
+**Intent**: {intent}
+**Tokens Mentioned**: {', '.join(tokens) if tokens else 'None'}
+
+**Response to Evaluate**:
+{response_content}
+
+**Instructions**:
+- Return a JSON object with:
+  - "completeness_score": 0.0-1.0 (1.0 = complete, 0.0 = incomplete/truncated)
+  - "freshness_score": 0.0-1.0 (1.0 = very recent data, 0.5 = moderately old, 0.0 = stale)
+  - "relevance_score": 0.0-1.0 (1.0 = highly relevant, 0.0 = not relevant)
+  - "overall_score": 0.0-1.0 (weighted average: completeness 40%, freshness 30%, relevance 30%)
+  - "feedback": Brief explanation of scores and any issues found
+
+**Example Response**:
+{{
+  "completeness_score": 0.9,
+  "freshness_score": 0.8,
+  "relevance_score": 1.0,
+  "overall_score": 0.91,
+  "feedback": "Response is complete and highly relevant. Data appears recent (within last hour)."
+}}
+
+Return ONLY the JSON object, no additional text."""
+
+        try:
+            evaluation_response = self.evaluator_llm.invoke([SystemMessage(content=evaluation_prompt)])
+            evaluation_text = evaluation_response.content if hasattr(evaluation_response, 'content') else str(evaluation_response)
+            
+            # Extract JSON from response
+            
+            # Try to find JSON in the response
+            json_match = re.search(r'\{[^{}]*\}', evaluation_text, re.DOTALL)
+            if json_match:
+                evaluation_json = json.loads(json_match.group())
+            else:
+                # Fallback: try parsing the whole response
+                evaluation_json = json.loads(evaluation_text)
+            
+            overall_score = evaluation_json.get("overall_score", 0.5)
+            feedback = evaluation_json.get("feedback", "Evaluation completed")
+            
+            overall_score_float = float(overall_score)
+            logger.info(f"Evaluator score: {overall_score_float:.2f} (threshold: {self.evaluation_threshold})")
+            logger.debug(f"Evaluator feedback: {feedback}")
+            
+            # Prepare state updates
+            state_updates = {
+                "evaluation_score": overall_score_float,
+                "evaluation_feedback": feedback
+            }
+            
+            # If revision is needed, add feedback as a system message and increment revision count
+            if overall_score_float < self.evaluation_threshold:
+                revision_count = state.get("revision_count", 0)
+                if revision_count < self.max_revisions:
+                    feedback_message = SystemMessage(
+                        content=f"**EVALUATION FEEDBACK (Revision {revision_count + 1}/{self.max_revisions})**:\n"
+                               f"Score: {overall_score_float:.2f} (threshold: {self.evaluation_threshold})\n"
+                               f"Issues: {feedback}\n\n"
+                               f"Please revise your previous response to address these issues. "
+                               f"Focus on improving completeness, data freshness, and relevance to the user's query."
+                    )
+                    state_updates["messages"] = [feedback_message]
+                    state_updates["revision_count"] = revision_count + 1
+            
+            return state_updates
+            
+        except Exception as e:
+            logger.error(f"Error in evaluator: {e}", exc_info=True)
+            # Default to passing if evaluation fails
+            return {
+                "evaluation_score": 1.0,
+                "evaluation_feedback": f"Evaluation error: {str(e)}"
+            }
+    
+    def _should_revise(self, state: AgentState) -> str:
+        """
+        Determine if we should revise the response or return it to the user.
+        
+        Args:
+            state: Current agent state
+            
+        Returns:
+            "pass" if score >= threshold, "revise" if score < threshold and revisions remaining
+        """
+        score = state.get("evaluation_score", 1.0)
+        revision_count = state.get("revision_count", 0)
+        
+        # If score passes threshold, return to user
+        if score >= self.evaluation_threshold:
+            logger.info(f"✅ Response passed evaluation (score: {score:.2f} >= {self.evaluation_threshold})")
+            return "pass"
+        
+        # If we've exceeded max revisions, return anyway
+        if revision_count >= self.max_revisions:
+            logger.warning(f"⚠️  Max revisions reached ({revision_count}), returning response despite low score ({score:.2f})")
+            return "pass"
+        
+        # Need revision
+        logger.info(f"🔄 Response needs revision (score: {score:.2f} < {self.evaluation_threshold}, revision {revision_count + 1}/{self.max_revisions})")
+        return "revise"
+    
     def chat(self, user_input: str) -> str:
         """
         Process user input and return response.
@@ -508,7 +684,10 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             state_update = {
                 "messages": [human_message],  # add_messages reducer will append to conversation history
                 "intent": "unknown",  # Will be set by classify_intent node
-                "tokens": []  # Will be set by classify_intent node
+                "tokens": [],  # Will be set by classify_intent node
+                "revision_count": 0,  # Track revision attempts
+                "evaluation_score": 0.0,  # Last evaluation score
+                "evaluation_feedback": ""  # Feedback from evaluator
             }
             
             # Run the graph with memory - conversation history is automatically loaded from checkpointer
@@ -540,7 +719,17 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
                     # Check if response seems incomplete (doesn't end with punctuation)
                     if not response_content.strip().endswith(('.', '!', '?', '。', '！', '？', '\n')):
                         logger.warning(f"Response may be incomplete - doesn't end with punctuation. Length: {len(response_content)}")
-                    self._record_history_message("assistant", response_content)
+                    
+                    # Extract evaluation metadata from final state
+                    evaluation_metadata = {}
+                    if "evaluation_score" in final_state:
+                        evaluation_metadata["evaluation_score"] = final_state.get("evaluation_score", 0.0)
+                    if "evaluation_feedback" in final_state:
+                        evaluation_metadata["evaluation_feedback"] = final_state.get("evaluation_feedback", "")
+                    if "revision_count" in final_state:
+                        evaluation_metadata["revision_count"] = final_state.get("revision_count", 0)
+                    
+                    self._record_history_message("assistant", response_content, additional_metadata=evaluation_metadata if evaluation_metadata else None)
                     return response_content
                 
                 fallback_msg = "I apologize, but I couldn't generate a response. Please try again."
@@ -801,12 +990,15 @@ Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive
         except Exception as e:
             logger.warning(f"Unable to ensure history session: {e}")
 
-    def _record_history_message(self, role: str, content: str):
-        """Persist a message to SQLite history with metadata summary."""
+    def _record_history_message(self, role: str, content: str, additional_metadata: Optional[Dict[str, Any]] = None):
+        """Persist a message to SQLite history with metadata summary and optional additional metadata."""
         if not content:
             return
         try:
             metadata = {"summary": self._summarize_for_history(content)}
+            # Add additional metadata (e.g., evaluation scores)
+            if additional_metadata:
+                metadata.update(additional_metadata)
             history_store.append_message(
                 session_id=self.thread_id,
                 user_id=self.user_id,

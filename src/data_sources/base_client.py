@@ -9,6 +9,10 @@ import requests
 import logging
 from datetime import datetime
 import time
+import json
+
+from src.memory import cache_manager
+from src.utils import config
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,102 @@ class BaseAPIClient(ABC):
         self.session = requests.Session()
         self.last_request_time = 0
         self.min_request_interval = 0.1  # Minimum seconds between requests
+        self._cache_namespace = f"api_cache:{self.__class__.__name__}"
         
+    def _can_cache(self, method: str) -> bool:
+        """
+        Determine if this request is eligible for caching.
+        """
+        return cache_manager.enabled and method.upper() == "GET"
+
+    def _should_use_cache(self, method: str, force_refresh: bool) -> bool:
+        """
+        Determine if caching should be used for this request.
+        """
+        return self._can_cache(method) and not force_refresh
+
+    def _normalize_params(self, params: Optional[Dict[str, Any]]) -> str:
+        """
+        Create a stable representation of params for cache keys.
+        """
+        if not params:
+            return "none"
+
+        def normalize_value(value: Any) -> str:
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, sort_keys=True)
+            return str(value)
+
+        return "&".join(
+            f"{key}={normalize_value(params[key])}"
+            for key in sorted(params.keys())
+        )
+
+    def _build_cache_key(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]],
+        custom_key: Optional[str] = None,
+    ) -> str:
+        """
+        Build a deterministic cache key for an API request.
+        """
+        if custom_key:
+            return custom_key
+
+        method_part = method.upper()
+        endpoint_part = endpoint.strip("/") or "<root>"
+        params_part = self._normalize_params(params)
+
+        return cache_manager.make_key(
+            self._cache_namespace,
+            method_part,
+            endpoint_part,
+            params_part,
+        )
+
+    def _get_cached_response(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve a cached API response if available.
+        """
+        cached_entry = cache_manager.get(cache_key)
+        if (
+            cached_entry
+            and isinstance(cached_entry, dict)
+            and "data" in cached_entry
+        ):
+            logger.info(
+                f"♻️  [{self.__class__.__name__}] Cache HIT for {cache_key}"
+            )
+            return cached_entry["data"]
+        return None
+
+    def _store_cached_response(
+        self,
+        cache_key: str,
+        data: Any,
+        ttl: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Store API response in cache with metadata.
+        """
+        if not cache_manager.enabled:
+            return
+
+        payload = {
+            "data": data,
+            "meta": {
+                "cached_at": datetime.utcnow().isoformat() + "Z",
+                **(metadata or {}),
+            },
+        }
+        cache_manager.set(cache_key, payload, ttl=ttl or config.CACHE_TTL_SECONDS)
+        logger.debug(
+            f"🗂️  [{self.__class__.__name__}] Cached response ({cache_key}, TTL={ttl or config.CACHE_TTL_SECONDS}s)"
+        )
+
     def _rate_limit(self):
         """Implement basic rate limiting."""
         current_time = time.time()
@@ -101,7 +200,11 @@ class BaseAPIClient(ABC):
         endpoint: str, 
         params: Optional[Dict[str, Any]] = None,
         method: str = "GET",
-        timeout: int = 10
+        timeout: int = 10,
+        cache_ttl: Optional[int] = None,
+        force_refresh: bool = False,
+        cache_key: Optional[str] = None,
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
         """
         Make an API request with error handling and circuit breaker pattern.
@@ -119,7 +222,18 @@ class BaseAPIClient(ABC):
             Exception: If request fails or circuit breaker is open
         """
         api_name = self.__class__.__name__.replace("Client", "")
+        method_upper = method.upper()
+        read_from_cache = use_cache and self._should_use_cache(method_upper, force_refresh)
+        write_to_cache = use_cache and self._can_cache(method_upper) and not force_refresh
+        resolved_cache_key = None
+        effective_ttl = cache_ttl or config.CACHE_TTL_SECONDS
         
+        if read_from_cache:
+            resolved_cache_key = self._build_cache_key(method_upper, endpoint, params, cache_key)
+            cached_response = self._get_cached_response(resolved_cache_key)
+            if cached_response is not None:
+                return cached_response
+
         # Check if circuit breaker is open (rate limited)
         if self._is_circuit_breaker_open():
             cooldown_until = self._circuit_breaker_until.get(self.__class__.__name__, 0)
@@ -183,6 +297,19 @@ class BaseAPIClient(ABC):
                     logger.info(f"✅ [{api_name}] Success - Retrieved response")
             else:
                 logger.info(f"✅ [{api_name}] Success")
+            
+            if write_to_cache:
+                if not resolved_cache_key:
+                    resolved_cache_key = self._build_cache_key(method_upper, endpoint, params, cache_key)
+                self._store_cached_response(
+                    resolved_cache_key,
+                    result,
+                    ttl=effective_ttl,
+                    metadata={
+                        "endpoint": endpoint,
+                        "method": method_upper,
+                    },
+                )
             
             return result
             

@@ -194,7 +194,11 @@ class BinanceClient(BaseAPIClient):
         try:
             # Use ping endpoint
             endpoint = "ping"
-            self._make_request(endpoint)
+            self._make_request(
+                endpoint,
+                force_refresh=True,
+                use_cache=False
+            )
             logger.info("Binance API connection test successful")
             return True
         except Exception as e:

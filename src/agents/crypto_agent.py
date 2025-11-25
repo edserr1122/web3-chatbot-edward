@@ -53,6 +53,7 @@ class AgentState(TypedDict):
     revision_count: int  # Number of revision attempts
     evaluation_score: float  # Last evaluation score (0.0-1.0)
     evaluation_feedback: str  # Feedback from evaluator
+    validator_attempts: int  # Number of validator fix attempts (to prevent infinite loops)
 
 
 class CryptoAgent:
@@ -135,6 +136,7 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         # Evaluation settings
         self.evaluation_threshold = config.EVALUATION_THRESHOLD
         self.max_revisions = config.MAX_REVISIONS
+        self.max_validator_attempts = config.MAX_VALIDATOR_ATTEMPTS
         
         # Create tool instances
         self.fundamental_tool = FundamentalTool(fundamental_analyzer)
@@ -185,6 +187,7 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         workflow.add_node("off_topic", self._off_topic_node)
         workflow.add_node("agent", self._call_agent)
         workflow.add_node("tools", ToolNode(self.tools))
+        workflow.add_node("response_validator", self._response_validator_node)
         workflow.add_node("evaluator", self._evaluator_node)
         
         # Add edges
@@ -202,20 +205,30 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             }
         )
         
-        # Small talk and off-topic nodes end the workflow
-        workflow.add_edge("small_talk", END)
-        workflow.add_edge("off_topic", END)
+        # Small talk and off-topic nodes also go through response validator
+        workflow.add_edge("small_talk", "response_validator")
+        workflow.add_edge("off_topic", "response_validator")
         
-        # Agent routing (tools or evaluator)
+        # Agent routing (tools or response_validator)
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
             {
                 "continue": "tools",
-                "end": "evaluator"  # Route to evaluator instead of END
+                "end": "response_validator"  # Route to validator before evaluator
             }
         )
         workflow.add_edge("tools", "agent")
+        
+        # Response validator routing (valid → evaluator, invalid → agent to fix)
+        workflow.add_conditional_edges(
+            "response_validator",
+            self._should_fix_response,
+            {
+                "valid": "evaluator",  # Response is complete, proceed to evaluation
+                "invalid": "agent"  # Response has issues, fix it
+            }
+        )
         
         # Evaluator routing (end if score passes, or back to agent for revision)
         workflow.add_conditional_edges(
@@ -261,6 +274,8 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         
         # Call LLM with full conversation history - this includes all previous messages
         response = self.llm_with_tools.invoke(messages)
+
+        print("response", response)
         
         # Check if response was truncated by examining response_metadata
         is_truncated = False
@@ -278,25 +293,16 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             response_length = len(response.content) if response.content else 0
             logger.debug(f"LLM response length: {response_length} characters, finish_reason: {finish_reason}")
             
-            # Check if response might be truncated (common indicators)
-            if response_length > 0:
-                content_ends_properly = response.content.strip().endswith(('.', '!', '?', '。', '！', '？', '\n'))
-                # Also check if response ends mid-sentence or mid-word
-                last_chars = response.content.strip()[-10:] if len(response.content.strip()) >= 10 else response.content.strip()
-                ends_mid_sentence = not any(last_chars.endswith(ending) for ending in ['.', '!', '?', '。', '！', '？', '\n\n', '\n'])
-                
-                if is_truncated or (not content_ends_properly and response_length > 500 and ends_mid_sentence):
-                    logger.warning(f"Response may be incomplete - finish_reason: {finish_reason}, ends properly: {content_ends_properly}, length: {response_length}, last chars: {last_chars}")
-                    
-                    # If truncated or appears incomplete, try to continue the response
-                    if is_truncated or (response_length > 400 and ends_mid_sentence):
-                        logger.info("Attempting to continue truncated/incomplete response...")
-                        continued_response = self._continue_truncated_response(messages, response)
-                        if continued_response:
-                            logger.info("Successfully continued response")
-                            return {"messages": [continued_response]}
-                        else:
-                            logger.warning("Failed to continue response, returning truncated version")
+            # Only handle explicit truncation (finish_reason='length') - let AI-based validator handle semantic incompleteness
+            if is_truncated:
+                logger.warning(f"Response was truncated due to token limit (finish_reason: {finish_reason}, length: {response_length})")
+                logger.info("Attempting to continue truncated response...")
+                continued_response = self._continue_truncated_response(messages, response)
+                if continued_response:
+                    logger.info("Successfully continued response")
+                    return {"messages": [continued_response]}
+                else:
+                    logger.warning("Failed to continue response, will be caught by response validator")
         
         return {"messages": [response]}
     
@@ -322,8 +328,12 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         else:
             return {"intent": "unknown", "tokens": []}
         
+        # Extract conversation context (last 3 messages for context-aware classification)
+        # This helps classify follow-up responses like "Yes" correctly
+        conversation_context = messages[-3:] if len(messages) >= 3 else messages
+        
         try:
-            classification = self.intent_classifier.classify(user_input)
+            classification = self.intent_classifier.classify(user_input, conversation_context=conversation_context)
             intent = classification.get("intent", "unknown")
             tokens = classification.get("tokens", [])
             
@@ -494,6 +504,272 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         
         # Otherwise, end
         return "end"
+    
+    def _response_validator_node(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Validate that the response is complete and properly formatted.
+        Checks for raw tool call syntax, incomplete responses, and missing tool results.
+        If issues are found, adds feedback message for agent to fix.
+        
+        Args:
+            state: Current agent state
+            
+        Returns:
+            Updated state (with feedback message if issues found)
+        """
+        messages = state["messages"]
+        
+        # Get the last AI message
+        last_ai_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                last_ai_message = msg
+                break
+        
+        if not last_ai_message:
+            logger.warning("No AI message found in response validator")
+            return {}
+        
+        response_content = ""
+        if hasattr(last_ai_message, 'content'):
+            response_content = last_ai_message.content or ""
+        
+        # Check for critical issues
+        has_raw_tool_syntax = "<function=" in response_content or "<function_calls>" in response_content
+        
+        # Check for unprocessed tool calls
+        has_unprocessed_tool = False
+        if "function=" in response_content and "{" in response_content:
+            import re
+            tool_call_pattern = r'<function[^>]*>\s*\{[^}]*"symbol"[^}]*\}'
+            if re.search(tool_call_pattern, response_content):
+                has_unprocessed_tool = True
+        
+        # Check for incomplete ending using AI-based semantic check
+        has_incomplete_ending = False
+        validator_attempts = state.get("validator_attempts", 0)
+        
+        # Only check for incomplete ending if we haven't exceeded max attempts (prevent infinite loops)
+        if response_content and len(response_content.strip()) > 100 and validator_attempts < self.max_validator_attempts:
+            # Use AI to check if response is semantically complete
+            has_incomplete_ending = self._check_incomplete_with_ai(response_content)
+        
+        # If issues found, add feedback message
+        if has_raw_tool_syntax or has_unprocessed_tool or has_incomplete_ending:
+            issues = []
+            if has_raw_tool_syntax:
+                issues.append("raw_tool_syntax")
+            if has_unprocessed_tool:
+                issues.append("unprocessed_tool")
+            if has_incomplete_ending:
+                issues.append("incomplete_ending")
+            
+            logger.warning(f"Response validation failed: {', '.join(issues)}")
+            
+            feedback_parts = ["**RESPONSE VALIDATION FEEDBACK**:\n"]
+            if has_raw_tool_syntax or has_unprocessed_tool:
+                feedback_parts.append("Your previous response contained raw tool call syntax or incomplete formatting. ")
+                feedback_parts.append("If you called tools, make sure to incorporate the tool results into your response ")
+                feedback_parts.append("in a natural, readable format. Do not include raw function calls or JSON in your response.\n\n")
+            if has_incomplete_ending:
+                feedback_parts.append("Your previous response appears to be incomplete or cut off mid-sentence. ")
+                feedback_parts.append("Please complete your response with a proper ending. Make sure to finish all thoughts and sentences.\n\n")
+            
+            feedback_parts.append("Please regenerate a complete, natural language response.")
+            
+            feedback_message = SystemMessage(content="".join(feedback_parts))
+            return {
+                "messages": [feedback_message],
+                "validator_attempts": validator_attempts + 1
+            }
+        
+        # Response is valid - reset validator attempts
+        logger.debug("Response validation passed")
+        return {"validator_attempts": 0}
+    
+    def _check_incomplete_with_ai(self, response_content: str) -> bool:
+        """
+        Use AI to check if response is semantically complete.
+        This is more sophisticated than simple punctuation checks.
+        
+        Args:
+            response_content: The response text to check
+            
+        Returns:
+            True if response is incomplete, False if complete
+        """
+        try:
+            # Get last 100 chars for context
+            last_portion = response_content.strip()[-100:] if len(response_content.strip()) > 100 else response_content.strip()
+            
+            completeness_prompt = f"""You are a response completeness checker. Determine if the following response is semantically complete or cut off mid-sentence.
+
+**Response ending (last 100 chars)**:
+{last_portion}
+
+**CRITICAL RULES**:
+1. **Emojis ALWAYS indicate completeness**: If a response ends with ANY emoji (😊, 🍞, ✨, 🚀, 📈, 💰, ✅, ❌, etc.), it is ALWAYS COMPLETE. Emojis are valid sentence endings.
+2. **Punctuation is not required**: Responses can end with emojis, punctuation, or natural sentence endings.
+3. **Only flag if clearly cut off**: Only mark as INCOMPLETE if the response clearly cuts off mid-word, mid-sentence, or mid-thought.
+
+**A response is COMPLETE if it**:
+- Ends with ANY emoji (🚀, 😊, 🍞, ✨, 📈, etc.) - THIS IS ALWAYS COMPLETE
+- Finishes all thoughts and sentences
+- Has proper closure (period, exclamation, question mark, or natural ending)
+- Ends with complete words (even without punctuation)
+- Doesn't cut off mid-word or mid-thought
+
+**A response is INCOMPLETE ONLY if it**:
+- Cuts off mid-sentence (e.g., "7 **Finish the" or "knead the dough on a")
+- Ends with incomplete words (e.g., "The process of mak" - word cut off)
+- Clearly stops before finishing a thought (e.g., "The process of making bread involves..." with no ending)
+- Appears truncated mid-word
+
+**Examples**:
+- "Feel free to clarify! 😊" → COMPLETE (emoji ending)
+- "Making bread yourself is rewarding. 🍞✨" → COMPLETE (emoji ending)
+- "Great analysis! 🚀" → COMPLETE (emoji ending)
+- "Bitcoin is bullish 📈" → COMPLETE (emoji ending, no punctuation needed)
+- "7 **Finish the" → INCOMPLETE (cuts off mid-sentence)
+- "knead the dough on a" → INCOMPLETE (cuts off mid-sentence)
+- "The process of mak" → INCOMPLETE (word cut off)
+
+**IMPORTANT**: If the response ends with an emoji, it is ALWAYS COMPLETE. Do not flag it as incomplete.
+
+Return ONLY a JSON object:
+{{
+  "is_complete": true or false,
+  "reason": "brief explanation"
+}}"""
+
+            response = self.evaluator_llm.invoke([SystemMessage(content=completeness_prompt)])
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Extract JSON
+            import re
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                is_complete = result.get("is_complete", True)  # Default to complete if unsure
+                reason = result.get("reason", "")
+                
+                # Double-check: if response ends with emoji, force it to be complete
+                # This is a safety check in case the AI misinterprets
+                import unicodedata
+                last_char = response_content.strip()[-1] if response_content.strip() else ""
+                # Check if last character is an emoji (Unicode emoji range)
+                is_emoji = (
+                    ord(last_char) >= 0x1F300 and ord(last_char) <= 0x1F9FF  # Emoticons, symbols, etc.
+                    or ord(last_char) >= 0x1F600 and ord(last_char) <= 0x1F64F  # Emoticons
+                    or ord(last_char) >= 0x2600 and ord(last_char) <= 0x26FF  # Miscellaneous symbols
+                    or ord(last_char) >= 0x2700 and ord(last_char) <= 0x27BF  # Dingbats
+                    or unicodedata.category(last_char) == 'So'  # Symbol, other (includes many emojis)
+                )
+                
+                if is_emoji and not is_complete:
+                    logger.warning(f"AI flagged emoji-ending response as incomplete, but emojis are always complete. Overriding. Reason: {reason}")
+                    is_complete = True
+                
+                if not is_complete:
+                    logger.warning(f"AI detected incomplete response: {reason}")
+                else:
+                    logger.debug(f"AI confirmed response is complete: {reason}")
+                
+                return not is_complete  # Return True if incomplete
+            else:
+                # If JSON parsing fails, fall back to simple check (but be lenient)
+                logger.warning("Failed to parse AI completeness check, using fallback")
+                # Fallback: check if ends with emoji - if so, always complete
+                import unicodedata
+                last_char = response_content.strip()[-1] if response_content.strip() else ""
+                is_emoji = (
+                    ord(last_char) >= 0x1F300 and ord(last_char) <= 0x1F9FF
+                    or ord(last_char) >= 0x1F600 and ord(last_char) <= 0x1F64F
+                    or ord(last_char) >= 0x2600 and ord(last_char) <= 0x26FF
+                    or ord(last_char) >= 0x2700 and ord(last_char) <= 0x27BF
+                    or unicodedata.category(last_char) == 'So'
+                )
+                
+                if is_emoji:
+                    logger.debug("Fallback: Response ends with emoji, marking as complete")
+                    return False  # Not incomplete
+                
+                # Only flag if clearly cut off (ends with incomplete word pattern)
+                last_word = response_content.strip().split()[-1] if response_content.strip().split() else ""
+                # Only flag if last word is very short (< 3 chars) and doesn't end with punctuation
+                if len(last_word) < 3 and not any(c in last_word for c in '.!?。！？'):
+                    return True
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in AI completeness check: {e}", exc_info=True)
+            # Fallback: be lenient, don't flag unless clearly cut off
+            return False
+    
+    def _should_fix_response(self, state: AgentState) -> str:
+        """
+        Determine if response needs fixing or is valid.
+        
+        Args:
+            state: Current agent state
+            
+        Returns:
+            "valid" if response is good, "invalid" if needs fixing
+        """
+        messages = state["messages"]
+        
+        # Get the last AI message
+        last_ai_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                last_ai_message = msg
+                break
+        
+        if not last_ai_message:
+            return "valid"  # No message to validate, proceed
+        
+        response_content = ""
+        if hasattr(last_ai_message, 'content'):
+            response_content = last_ai_message.content or ""
+        
+        # Check for critical issues that require fixing
+        has_raw_tool = "<function=" in response_content or "<function_calls>" in response_content
+        
+        # Check for unprocessed tool calls
+        has_unprocessed_tool = False
+        if "function=" in response_content and "{" in response_content:
+            import re
+            tool_call_pattern = r'<function[^>]*>\s*\{[^}]*"symbol"[^}]*\}'
+            if re.search(tool_call_pattern, response_content):
+                has_unprocessed_tool = True
+        
+        # Check for incomplete ending using AI (only if we haven't exceeded max attempts)
+        validator_attempts = state.get("validator_attempts", 0)
+        has_incomplete_ending = False
+        
+        if response_content and len(response_content.strip()) > 100 and validator_attempts < self.max_validator_attempts:
+            has_incomplete_ending = self._check_incomplete_with_ai(response_content)
+        
+        # If any critical issues, need to fix (but respect max attempts)
+        if (has_raw_tool or has_unprocessed_tool or has_incomplete_ending) and validator_attempts < self.max_validator_attempts:
+            issues = []
+            if has_raw_tool:
+                issues.append("raw_tool_syntax")
+            if has_unprocessed_tool:
+                issues.append("unprocessed_tool")
+            if has_incomplete_ending:
+                issues.append("incomplete_ending")
+            logger.info(f"🔄 Response has critical issues ({', '.join(issues)}), routing back to agent to fix (attempt {validator_attempts + 1}/{self.max_validator_attempts})")
+            return "invalid"
+        
+        # If max attempts reached, accept the response (prevent infinite loop)
+        if validator_attempts >= self.max_validator_attempts:
+            logger.warning(f"⚠️  Max validator attempts reached ({validator_attempts}), accepting response to prevent infinite loop")
+            return "valid"
+        
+        # Response is valid, proceed to evaluator
+        logger.debug("✅ Response validation passed, proceeding to evaluator")
+        return "valid"
     
     def _evaluator_node(self, state: AgentState) -> Dict[str, Any]:
         """
@@ -687,7 +963,8 @@ Return ONLY the JSON object, no additional text."""
                 "tokens": [],  # Will be set by classify_intent node
                 "revision_count": 0,  # Track revision attempts
                 "evaluation_score": 0.0,  # Last evaluation score
-                "evaluation_feedback": ""  # Feedback from evaluator
+                "evaluation_feedback": "",  # Feedback from evaluator
+                "validator_attempts": 0  # Track validator fix attempts
             }
             
             # Run the graph with memory - conversation history is automatically loaded from checkpointer
@@ -716,9 +993,7 @@ Return ONLY the JSON object, no additional text."""
                 # Log response length for debugging
                 if response_content:
                     logger.debug(f"Final response length: {len(response_content)} characters")
-                    # Check if response seems incomplete (doesn't end with punctuation)
-                    if not response_content.strip().endswith(('.', '!', '?', '。', '！', '？', '\n')):
-                        logger.warning(f"Response may be incomplete - doesn't end with punctuation. Length: {len(response_content)}")
+                    # Note: Completeness is now checked by AI-based validator, not here
                     
                     # Extract evaluation metadata from final state
                     evaluation_metadata = {}

@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich import print as rprint
 from src import CryptoChatbot
+from src.utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -188,59 +189,7 @@ def run_cli(verbose: bool = False):
     Args:
         verbose: If True, show INFO logs in console. If False, only show WARNING/ERROR.
     """
-    import io
-    
-    # Setup logging with proper UTF-8 handling
-    # File handler - ALWAYS logs everything (INFO level)
-    file_handler = logging.FileHandler('chatbot.log', encoding='utf-8', mode='a')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    )
-    
-    # Console handler with UTF-8 wrapping for Windows
-    if sys.platform == 'win32':
-        # Wrap stdout to handle UTF-8
-        console_stream = io.TextIOWrapper(
-            sys.stdout.buffer,
-            encoding='utf-8',
-            errors='replace',
-            line_buffering=True
-        )
-    else:
-        console_stream = sys.stdout
-    
-    console_handler = logging.StreamHandler(console_stream)
-    # Set console level based on verbose flag
-    if verbose:
-        console_handler.setLevel(logging.INFO)  # Show all INFO logs
-        console_handler.setFormatter(
-            logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        )
-    else:
-        console_handler.setLevel(logging.WARNING)  # Only show WARNING and ERROR
-        console_handler.setFormatter(
-            logging.Formatter('[%(levelname)s] %(message)s')  # Simpler format for production
-        )
-    
-    # Configure root logger explicitly
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    
-    # Clear any existing handlers to avoid duplicates
-    root_logger.handlers.clear()
-    
-    # Add our handlers
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-    
-    # Force all child loggers to propagate to root and respect root level
-    # This ensures logs from src.data_sources.*, src.analyzers.*, etc. are captured
-    for logger_name in ['src', 'src.data_sources', 'src.analyzers', 'src.tools', 'src.agents']:
-        child_logger = logging.getLogger(logger_name)
-        child_logger.setLevel(logging.INFO)
-        child_logger.propagate = True
-        child_logger.handlers.clear()  # Remove any handlers that might bypass root
+    file_handler = setup_logging(verbose=verbose, enable_console=True)
     
     console = Console()
     

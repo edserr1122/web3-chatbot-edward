@@ -1,10 +1,12 @@
 """
-Alternative.me Fear & Greed Index client.
+Alternative.me API client (Fear & Greed Index + Crypto Data).
 Free API, no authentication required.
-Documentation: https://alternative.me/crypto/fear-and-greed-index/
+Documentation: 
+- Fear & Greed: https://alternative.me/crypto/fear-and-greed-index/
+- Crypto API v2: https://api.alternative.me/
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .base_client import BaseAPIClient
 import logging
 
@@ -12,16 +14,23 @@ logger = logging.getLogger(__name__)
 
 
 class FearGreedClient(BaseAPIClient):
-    """Client for Alternative.me Fear & Greed Index API."""
+    """
+    Client for Alternative.me API.
     
-    def __init__(self, base_url: str = "https://api.alternative.me/fng/"):
+    Provides:
+    - Fear & Greed Index (market sentiment)
+    - Global crypto market data
+    - Basic crypto ticker data (as fallback)
+    """
+    
+    def __init__(self):
         """
-        Initialize Fear & Greed client.
+        Initialize Alternative.me client.
         
-        Args:
-            base_url: API base URL
+        Note: No API key required - completely free!
         """
-        super().__init__(api_key=None, base_url=base_url)
+        # Use v2 API base, switch to /fng/ for Fear & Greed
+        super().__init__(api_key=None, base_url="https://api.alternative.me/")
         self.min_request_interval = 0.5
         
     def get_token_data(self, symbol: str = None) -> Dict[str, Any]:
@@ -45,7 +54,7 @@ class FearGreedClient(BaseAPIClient):
             dict: Current index data
         """
         params = {"limit": 1}
-        response = self._make_request("", params)
+        response = self._make_request("fng/", params)
         
         data = response.get("data", [{}])[0]
         
@@ -71,9 +80,93 @@ class FearGreedClient(BaseAPIClient):
             list: Historical index data
         """
         params = {"limit": days}
-        response = self._make_request("", params)
+        response = self._make_request("fng/", params)
         
         return response.get("data", [])
+    
+    def get_global_data(self, convert: str = "USD") -> Dict[str, Any]:
+        """
+        Get global cryptocurrency market data.
+        
+        ⚡ USE THIS for global market overview - simpler than CoinGecko/CMC!
+        
+        Args:
+            convert: Currency conversion (USD, EUR, GBP, etc.)
+            
+        Returns:
+            dict: Global market statistics
+            
+        Reference: https://api.alternative.me/v2/global/
+        """
+        params = {}
+        if convert != "USD":
+            params["convert"] = convert
+        
+        response = self._make_request("v2/global/", params)
+        data = response.get("data", {})
+        quotes = data.get("quotes", {}).get(convert, {})
+        
+        return {
+            "active_cryptocurrencies": data.get("active_cryptocurrencies"),
+            "active_markets": data.get("active_markets"),
+            "bitcoin_dominance": data.get("bitcoin_percentage_of_market_cap"),
+            "total_market_cap": quotes.get("total_market_cap"),
+            "total_volume_24h": quotes.get("total_volume_24h"),
+            "last_updated": data.get("last_updated"),
+        }
+    
+    def get_ticker(self, limit: int = 100, convert: str = "USD") -> List[Dict[str, Any]]:
+        """
+        Get ticker data for multiple cryptocurrencies.
+        
+        ⚠️ USE AS FALLBACK ONLY - CoinGecko/CMC provide better data.
+        Only use this if other sources fail.
+        
+        Args:
+            limit: Number of results (0 for all)
+            convert: Currency conversion (USD, EUR, BTC, ETH, etc.)
+            
+        Returns:
+            list: Ticker data for multiple coins
+            
+        Reference: https://api.alternative.me/v2/ticker/
+        """
+        params = {
+            "limit": limit,
+            "structure": "array"
+        }
+        if convert != "USD":
+            params["convert"] = convert
+        
+        response = self._make_request("v2/ticker/", params)
+        return response.get("data", [])
+    
+    def get_ticker_specific(self, symbol_or_id: str, convert: str = "USD") -> Optional[Dict[str, Any]]:
+        """
+        Get ticker data for a specific cryptocurrency.
+        
+        ⚠️ USE AS FALLBACK ONLY - CoinGecko/CMC provide better data.
+        
+        Args:
+            symbol_or_id: Coin ID or website slug (e.g., "bitcoin", "1")
+            convert: Currency conversion (USD, EUR, BTC, ETH, etc.)
+            
+        Returns:
+            dict: Ticker data for specific coin
+            
+        Reference: https://api.alternative.me/v2/ticker/(id,name)/
+        """
+        params = {}
+        if convert != "USD":
+            params["convert"] = convert
+        
+        response = self._make_request(f"v2/ticker/{symbol_or_id}/", params)
+        data = response.get("data", {})
+        
+        # Extract first item from dictionary
+        if data:
+            return list(data.values())[0]
+        return None
     
     def _interpret_value(self, value: int) -> str:
         """

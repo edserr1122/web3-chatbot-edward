@@ -17,13 +17,17 @@ class Config:
     # OpenAI Configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+
+    # Groq Configuration
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     
     # Crypto Data API Keys
     COINGECKO_API_KEY: Optional[str] = os.getenv("COINGECKO_API_KEY")
     COINMARKETCAP_API_KEY: Optional[str] = os.getenv("COINMARKETCAP_API_KEY")
+    COINCAP_API_KEY: Optional[str] = os.getenv("COINCAP_API_KEY")
     
-    # Sentiment & Social API Keys
-    LUNARCRUSH_API_KEY: Optional[str] = os.getenv("LUNARCRUSH_API_KEY")
+    # Sentiment & News API Keys
     CRYPTOPANIC_API_KEY: Optional[str] = os.getenv("CRYPTOPANIC_API_KEY")
     MESSARI_API_KEY: Optional[str] = os.getenv("MESSARI_API_KEY")
     
@@ -108,7 +112,7 @@ class Config:
             bool: True if configuration is valid, False otherwise
         """
         required_keys = [
-            ("OPENAI_API_KEY", cls.OPENAI_API_KEY),
+            ("GROQ_API_KEY", cls.GROQ_API_KEY),
         ]
         
         missing_keys = []
@@ -144,7 +148,7 @@ class Config:
         return {
             "coingecko": bool(cls.COINGECKO_API_KEY) or True,  # Has free tier without key
             "coinmarketcap": bool(cls.COINMARKETCAP_API_KEY),
-            "lunarcrush": bool(cls.LUNARCRUSH_API_KEY),
+            "coincap": bool(cls.COINCAP_API_KEY),
             "cryptopanic": bool(cls.CRYPTOPANIC_API_KEY),
             "messari": bool(cls.MESSARI_API_KEY),
             "fear_greed": True,  # Always available (free API)
@@ -157,8 +161,8 @@ class Config:
         print("=" * 60)
         print("🔧 Configuration Status")
         print("=" * 60)
-        print(f"OpenAI Model: {cls.OPENAI_MODEL}")
-        print(f"OpenAI API Key: {'✅ Set' if cls.OPENAI_API_KEY else '❌ Missing'}")
+        print(f"GROQ Model: {cls.GROQ_MODEL}")
+        print(f"GROQ API Key: {'✅ Set' if cls.GROQ_API_KEY else '❌ Missing'}")
         print(f"\nData Sources:")
         
         sources = cls.get_available_data_sources()

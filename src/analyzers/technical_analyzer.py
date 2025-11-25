@@ -15,14 +15,25 @@ logger = logging.getLogger(__name__)
 class TechnicalAnalyzer:
     """Performs technical analysis on cryptocurrency tokens."""
     
-    def __init__(self, coingecko_client: Optional[CoinGeckoClient] = None):
+    def __init__(
+        self, 
+        coingecko_client: Optional[CoinGeckoClient] = None,
+        binance_clients: Optional[List[Any]] = None,  # Ordered Binance clients
+        coincap_client: Optional[Any] = None  # CoinCapClient fallback
+    ):
         """
         Initialize Technical Analyzer.
         
         Args:
-            coingecko_client: CoinGecko API client
+            coingecko_client: CoinGecko API client (primary OHLC data source)
+            binance_client: Binance API client (fallback for OHLC data - excellent quality)
+            
+        Note: CoinMarketCap is NOT used because historical OHLCV data 
+              requires a paid subscription (Hobbyist or higher).
         """
         self.coingecko = coingecko_client
+        self.binance_clients = binance_clients or []
+        self.coincap = coincap_client
     
     def analyze(self, symbol: str) -> Dict[str, Any]:
         """
@@ -35,14 +46,38 @@ class TechnicalAnalyzer:
             dict: Technical analysis results
         """
         try:
-            # Get OHLC data
-            ohlc_data = self._get_ohlc_data(symbol, days=90)
+            logger.info(f"🔍 [TechnicalAnalyzer] Starting analysis for {symbol}")
             
-            if not ohlc_data:
-                return {"error": "Unable to fetch OHLC data for technical analysis"}
+            # Get OHLC data with source tracking
+            ohlc_data, data_source = self._get_ohlc_data(symbol, days=90)
+            
+            # Minimum 20 points needed for RSI (14-period) + some buffer
+            if not ohlc_data or len(ohlc_data) < 20:
+                logger.error(f"   ❌ [TechnicalAnalyzer] Insufficient OHLC data for {symbol}")
+                return {
+                    "error": "Unable to fetch sufficient OHLC data for technical analysis",
+                    "note": f"Technical analysis requires at least 20 data points (got {len(ohlc_data) if ohlc_data else 0})",
+                    "limitation": "All data sources unavailable - may be due to API rate limits, network issues, or token not listed on exchanges"
+                }
+            
+            # Log data source
+            logger.info(f"📊 [TechnicalAnalyzer] Data sources used: {data_source} (OHLC data - {len(ohlc_data)} points)")
             
             # Convert to DataFrame
             df = self._prepare_dataframe(ohlc_data)
+            
+            # Additional safety check (20 minimum for RSI-14 + buffer)
+            if df.empty or len(df) < 20:
+                logger.warning(f"⚠️  [TechnicalAnalyzer] Insufficient DataFrame data for {symbol}")
+                return {
+                    "error": "Insufficient OHLC data for technical analysis",
+                    "note": f"Technical analysis requires at least 20 data points (got {len(df)})",
+                    "limitation": "CoinGecko free tier may limit OHLC data availability"
+                }
+            
+            # Log if we have limited data
+            if len(df) < 50:
+                logger.warning(f"⚠️  [TechnicalAnalyzer] Limited data ({len(df)} points) - Some indicators may be less reliable")
             
             # Calculate indicators
             indicators = {
@@ -56,30 +91,108 @@ class TechnicalAnalyzer:
             # Generate signals
             signals = self._generate_signals(indicators)
             
+            # Add data limitation note if applicable
+            data_note = None
+            if len(df) < 50:
+                data_note = f"Analysis based on {len(df)} data points ({data_source if data_source else 'limited source'}). Some indicators may have reduced accuracy."
+            
             # Generate analysis
             analysis = {
                 "symbol": symbol.upper(),
+                "data_points": len(df),
+                "data_source": data_source if data_source else "unknown",
                 "indicators": indicators,
                 "signals": signals,
                 "summary": self._generate_summary(indicators, signals),
             }
             
+            if data_note:
+                analysis["data_limitation_note"] = data_note
+            
+            logger.info(f"✅ [TechnicalAnalyzer] Analysis completed for {symbol}")
             return analysis
             
         except Exception as e:
-            logger.error(f"Technical analysis failed for {symbol}: {e}")
+            logger.error(f"❌ [TechnicalAnalyzer] Analysis failed for {symbol}: {e}")
             raise
     
-    def _get_ohlc_data(self, symbol: str, days: int = 90) -> Optional[List]:
-        """Get OHLC (Open, High, Low, Close) data."""
-        if not self.coingecko:
-            return None
+    def _get_ohlc_data(self, symbol: str, days: int = 90) -> tuple[Optional[List], Optional[str]]:
+        """
+        Get OHLC (Open, High, Low, Close) data with fallback support.
         
-        try:
-            return self.coingecko.get_ohlc(symbol, days=days)
-        except Exception as e:
-            logger.warning(f"OHLC data fetch failed: {e}")
-            return None
+        Priority: Binance (Global → US) → CoinGecko → CoinCap TA
+        
+        Note: CoinMarketCap historical OHLCV requires paid subscription.
+        
+        Requires at least 20 data points (minimum for RSI-14 calculation).
+        
+        Returns:
+            tuple: (ohlc_data, source_name) where source_name is the API that provided data
+        """
+        ohlc_data = None
+        data_source = None
+        
+        # Priority 1: Binance clients (global first -> US)
+        if self.binance_clients:
+            for binance_client in self.binance_clients:
+                binance_name = binance_client.__class__.__name__.replace("Client", "")
+                try:
+                    logger.info(f"   🔄 [{binance_name}] Using fallback for OHLC data ({symbol})")
+                    klines = binance_client.get_klines(symbol, interval="1d", limit=min(days, 1000))
+                    
+                    # Convert Binance klines to CoinGecko-compatible format
+                    ohlc_data = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4])] for k in klines]
+                    
+                    if ohlc_data and len(ohlc_data) >= 20:
+                        data_source = binance_name
+                        logger.info(f"   ✅ [{binance_name}] Returned {len(ohlc_data)} OHLC points (excellent quality)")
+                        return ohlc_data, data_source
+                    else:
+                        logger.warning(f"   ⚠️  [{binance_name}] Insufficient OHLC data ({len(ohlc_data) if ohlc_data else 0} points)")
+                        
+                except Exception as e:
+                    logger.warning(f"   ⚠️  [{binance_name}] OHLC fetch failed: {e}")
+        
+        # Priority 2: CoinGecko
+        if not ohlc_data and self.coingecko:
+            try:
+                logger.info(f"   📊 [CoinGecko] Fetching OHLC from CoinGecko")
+                ohlc_data = self.coingecko.get_ohlc(symbol, days=days)
+                
+                if ohlc_data and len(ohlc_data) >= 20:
+                    data_source = "CoinGecko"
+                    if len(ohlc_data) >= 50:
+                        logger.info(f"   ✅ [CoinGecko] Returned {len(ohlc_data)} OHLC points (optimal)")
+                    else:
+                        logger.info(f"   ✅ [CoinGecko] Returned {len(ohlc_data)} OHLC points (limited but usable)")
+                        logger.warning(f"   💡 CoinGecko free tier limits: Some indicators may have reduced accuracy")
+                    return ohlc_data, data_source
+                elif ohlc_data:
+                    logger.warning(f"   ⚠️  [CoinGecko] Returned only {len(ohlc_data)} OHLC points (need 20+ minimum)")
+                else:
+                    logger.warning(f"   ⚠️  [CoinGecko] Returned no OHLC data")
+                    
+            except Exception as e:
+                logger.warning(f"   ⚠️  [CoinGecko] OHLC fetch failed: {e}")
+        
+        # Priority 3: CoinCap TA candlesticks
+        if not ohlc_data and self.coincap:
+            try:
+                logger.info(f"   🔄 [CoinCap] Using TA candlesticks for OHLC data ({symbol})")
+                ohlc_data = self.coincap.get_candlesticks(symbol, interval="d1", limit=min(days, 200))
+                
+                if ohlc_data and len(ohlc_data) >= 20:
+                    data_source = "CoinCap"
+                    logger.info(f"   ✅ [CoinCap] Returned {len(ohlc_data)} OHLC points (TA endpoint)")
+                    return ohlc_data, data_source
+                else:
+                    logger.warning(f"   ⚠️  [CoinCap] Insufficient candlestick data ({len(ohlc_data) if ohlc_data else 0} points)")
+            except Exception as e:
+                logger.warning(f"   ⚠️  [CoinCap] Candlestick fetch failed: {e}")
+        
+        # No data source worked
+        logger.error(f"   ❌ [TechnicalAnalyzer] No OHLC data available from any source for {symbol}")
+        return None, None
     
     def _prepare_dataframe(self, ohlc_data: List) -> pd.DataFrame:
         """Convert OHLC data to pandas DataFrame."""
@@ -91,7 +204,7 @@ class TechnicalAnalyzer:
     def _calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> Dict[str, Any]:
         """Calculate Relative Strength Index."""
         rsi = ta.rsi(df["close"], length=period)
-        current_rsi = rsi.iloc[-1] if not rsi.empty else None
+        current_rsi = rsi.iloc[-1] if rsi is not None and not rsi.empty else None
         
         if current_rsi is None:
             return {"value": None, "signal": "Unknown", "interpretation": "Unable to calculate RSI"}
@@ -126,9 +239,13 @@ class TechnicalAnalyzer:
         if macd is None or macd.empty:
             return {"signal": "Unknown", "interpretation": "Unable to calculate MACD"}
         
-        current_macd = macd["MACD_12_26_9"].iloc[-1]
-        current_signal = macd["MACDs_12_26_9"].iloc[-1]
-        current_histogram = macd["MACDh_12_26_9"].iloc[-1]
+        # Additional safety check for None values in columns
+        try:
+            current_macd = macd["MACD_12_26_9"].iloc[-1]
+            current_signal = macd["MACDs_12_26_9"].iloc[-1]
+            current_histogram = macd["MACDh_12_26_9"].iloc[-1]
+        except (KeyError, IndexError, AttributeError):
+            return {"signal": "Unknown", "interpretation": "Unable to calculate MACD"}
         
         # Determine signal
         if current_macd > current_signal and current_histogram > 0:
@@ -151,24 +268,50 @@ class TechnicalAnalyzer:
     
     def _calculate_moving_averages(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Calculate Simple and Exponential Moving Averages."""
-        current_price = df["close"].iloc[-1]
+        try:
+            current_price = df["close"].iloc[-1]
+            data_points = len(df)
+            
+            # Calculate MAs based on available data
+            # Only calculate if we have enough data points
+            sma_20_series = ta.sma(df["close"], length=min(20, data_points)) if data_points >= 20 else None
+            sma_50_series = ta.sma(df["close"], length=min(50, data_points)) if data_points >= 50 else None
+            ema_20_series = ta.ema(df["close"], length=min(20, data_points)) if data_points >= 20 else None
+            ema_50_series = ta.ema(df["close"], length=min(50, data_points)) if data_points >= 50 else None
+            
+            sma_20 = sma_20_series.iloc[-1] if sma_20_series is not None and not sma_20_series.empty else None
+            sma_50 = sma_50_series.iloc[-1] if sma_50_series is not None and not sma_50_series.empty else None
+            ema_20 = ema_20_series.iloc[-1] if ema_20_series is not None and not ema_20_series.empty else None
+            ema_50 = ema_50_series.iloc[-1] if ema_50_series is not None and not ema_50_series.empty else None
+        except (IndexError, KeyError, AttributeError):
+            return {
+                "signal": "Unknown",
+                "interpretation": "Unable to calculate moving averages - insufficient data"
+            }
         
-        # Calculate MAs
-        sma_20 = ta.sma(df["close"], length=20).iloc[-1]
-        sma_50 = ta.sma(df["close"], length=50).iloc[-1]
-        ema_20 = ta.ema(df["close"], length=20).iloc[-1]
-        ema_50 = ta.ema(df["close"], length=50).iloc[-1]
-        
-        # Determine trend
-        if current_price > sma_20 and current_price > sma_50:
-            trend = "Bullish"
-            interpretation = "Price above both 20 and 50-day SMAs - uptrend confirmed"
-        elif current_price < sma_20 and current_price < sma_50:
-            trend = "Bearish"
-            interpretation = "Price below both 20 and 50-day SMAs - downtrend confirmed"
+        # Determine trend based on available MAs
+        if sma_20 and sma_50:
+            # Full analysis with both MAs
+            if current_price > sma_20 and current_price > sma_50:
+                trend = "Bullish"
+                interpretation = "Price above both 20 and 50-day SMAs - uptrend confirmed"
+            elif current_price < sma_20 and current_price < sma_50:
+                trend = "Bearish"
+                interpretation = "Price below both 20 and 50-day SMAs - downtrend confirmed"
+            else:
+                trend = "Mixed"
+                interpretation = "Price between moving averages - trend unclear"
+        elif sma_20:
+            # Limited data - use only 20-day MA
+            if current_price > sma_20:
+                trend = "Bullish"
+                interpretation = f"Price above 20-day SMA - short-term uptrend (limited to {data_points} data points)"
+            else:
+                trend = "Bearish"
+                interpretation = f"Price below 20-day SMA - short-term downtrend (limited to {data_points} data points)"
         else:
-            trend = "Mixed"
-            interpretation = "Price between moving averages - trend unclear"
+            trend = "Unknown"
+            interpretation = f"Insufficient data for moving averages (only {data_points} points available)"
         
         return {
             "sma_20": round(sma_20, 2) if sma_20 else None,
@@ -187,10 +330,13 @@ class TechnicalAnalyzer:
         if bbands is None or bbands.empty:
             return {"signal": "Unknown", "interpretation": "Unable to calculate Bollinger Bands"}
         
-        current_price = df["close"].iloc[-1]
-        upper_band = bbands[f"BBU_{period}_2.0"].iloc[-1]
-        middle_band = bbands[f"BBM_{period}_2.0"].iloc[-1]
-        lower_band = bbands[f"BBL_{period}_2.0"].iloc[-1]
+        try:
+            current_price = df["close"].iloc[-1]
+            upper_band = bbands[f"BBU_{period}_2.0"].iloc[-1]
+            middle_band = bbands[f"BBM_{period}_2.0"].iloc[-1]
+            lower_band = bbands[f"BBL_{period}_2.0"].iloc[-1]
+        except (KeyError, IndexError, AttributeError):
+            return {"signal": "Unknown", "interpretation": "Unable to calculate Bollinger Bands"}
         
         # Determine position
         band_width = upper_band - lower_band

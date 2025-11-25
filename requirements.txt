@@ -38,3 +38,7 @@ typing-extensions>=4.9.0
 
 # Async Support
 asyncio>=3.4.3
+
+# testing
+pytest>=7.0.0
+pytest-mock>=3.10.0

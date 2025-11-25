@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 import logging
 import json
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from src.utils import config
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,6 @@ Examples:
                 for msg in context_messages:
                     if hasattr(msg, 'content') and msg.content:
                         # Determine role based on message type
-                        from langchain_core.messages import AIMessage, HumanMessage
                         if isinstance(msg, AIMessage):
                             role = "Assistant"
                         elif isinstance(msg, HumanMessage):

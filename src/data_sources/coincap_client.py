@@ -274,7 +274,14 @@ class CoinCapClient(BaseAPIClient):
                 logger.warning("⚠️  CoinCap API key not configured - skipping connection test")
                 return False
             
-            self.get_token_data("BTC")
+            endpoint = "price/bysymbol/BTC"
+            response = self._make_request(
+                endpoint,
+                force_refresh=True,
+                use_cache=False
+            )
+            if not response.get("data"):
+                raise ValueError("Empty response")
             logger.info("✅ CoinCap API connection test successful")
             return True
         except Exception as e:

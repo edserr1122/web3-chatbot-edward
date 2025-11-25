@@ -197,8 +197,13 @@ class FearGreedClient(BaseAPIClient):
             bool: True if connection successful
         """
         try:
-            self.get_current()
-            return True
+            response = self._make_request(
+                "fng/",
+                {"limit": 1},
+                force_refresh=True,
+                use_cache=False,
+            )
+            return bool(response.get("data"))
         except Exception as e:
             logger.error(f"Fear & Greed connection test failed: {e}")
             return False

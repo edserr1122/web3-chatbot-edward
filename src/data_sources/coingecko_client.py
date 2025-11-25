@@ -294,7 +294,11 @@ class CoinGeckoClient(BaseAPIClient):
         """
         try:
             endpoint = "ping"
-            response = self._make_request(endpoint)
+            response = self._make_request(
+                endpoint,
+                force_refresh=True,
+                use_cache=False
+            )
             return response.get("gecko_says") == "(V3) To the Moon!"
         except Exception as e:
             logger.error(f"CoinGecko connection test failed: {e}")

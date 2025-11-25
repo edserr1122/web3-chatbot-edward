@@ -175,8 +175,15 @@ class MessariClient(BaseAPIClient):
             bool: True if connection successful
         """
         try:
-            self.get_assets_list(limit=1)
-            return True
+            endpoint = "metrics/v2/assets"
+            params = {"limit": 1, "page": 1}
+            response = self._make_request(
+                endpoint,
+                params,
+                force_refresh=True,
+                use_cache=False,
+            )
+            return bool(response.get("data"))
         except Exception as e:
             logger.error(f"Messari connection test failed: {e}")
             return False

@@ -137,9 +137,15 @@ pytest tests/ --cov=src --cov-report=html
 
 **Note**: Tests use mocks to avoid actual API calls. History store tests use temporary databases.
 
+**Important**: Before running tests, you need to manually set the Groq API key in `tests/conftest.py` (line 13). Replace `'gsk_abcd'` with a valid API key or a test key. This is required for intent classifier tests that use the Groq API.
+
 ## Notes
 
 - All API keys should be stored in `.env` file (not committed to repository)
 - Redis is optional - falls back to in-memory caching if unavailable
 - Logs are written to `chatbot.log` (production mode shows only errors in console)
 - Conversation history is stored in SQLite database for persistence
+
+## Author
+
+Edward Serrano

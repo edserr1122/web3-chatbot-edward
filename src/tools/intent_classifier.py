@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 import logging
 import json
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
 from src.utils import config
 
 logger = logging.getLogger(__name__)
@@ -27,8 +27,16 @@ Analyze the user's message and classify it into one of these categories:
 3. **off_topic**: Questions completely unrelated to crypto (movies, weather, general knowledge, etc.)
 4. **unknown**: If you're genuinely unsure
 
-Additionally, extract any cryptocurrency token names or symbols mentioned (e.g., "BTC", "Bitcoin", "Ethereum", "SOL", "TAO", etc.).
-Extract tokens even if they're mentioned casually or with typos.
+**IMPORTANT - Context-Aware Classification**:
+- If the user is responding to a previous question (e.g., "Yes", "No", "Sure", "OK"), classify based on what they're responding to:
+  * Responding to a crypto question → crypto_analysis
+  * Responding to a greeting → small_talk
+  * Responding to an off-topic question → off_topic
+
+- Extract tokens from:
+  * Current user message
+  * Previous assistant message (if it mentions tokens)
+  * Previous user messages in context
 
 Return ONLY valid JSON in this exact format:
 {
@@ -44,6 +52,8 @@ Examples:
 - "Tell me about ApeCoin" → {"intent": "crypto_analysis", "tokens": ["APE", "ApeCoin"]}
 - "What's your favorite coin?" → {"intent": "small_talk", "tokens": []}
 - "Thanks for the help!" → {"intent": "small_talk", "tokens": []}
+- Context: Assistant asked "Would you like technical analysis?" → User: "Yes" → {"intent": "crypto_analysis", "tokens": []}
+- Context: Assistant asked "How can I help?" → User: "Yes" → {"intent": "small_talk", "tokens": []}
 """
     
     def __init__(self):
@@ -62,12 +72,14 @@ Examples:
         )
         logger.info(f"✅ IntentClassifier initialized with Groq AI (model: {model}, optimized for speed)")
     
-    def classify(self, user_input: str) -> Dict[str, Any]:
+    def classify(self, user_input: str, conversation_context: Optional[List[BaseMessage]] = None) -> Dict[str, Any]:
         """
-        Classify user intent and extract crypto tokens.
+        Classify user intent and extract crypto tokens with optional conversation context.
         
         Args:
             user_input: User's message
+            conversation_context: Optional list of recent messages (from langchain_core.messages)
+                                 for context-aware classification
             
         Returns:
             dict with keys:
@@ -75,9 +87,37 @@ Examples:
                 - tokens: List of detected token symbols/names
         """
         try:
+            # Build context string if provided
+            context_text = ""
+            if conversation_context:
+                # Extract last 2-3 messages for context (last assistant + last 1-2 user messages)
+                context_messages = conversation_context[-3:] if len(conversation_context) > 3 else conversation_context
+                context_parts = []
+                for msg in context_messages:
+                    if hasattr(msg, 'content') and msg.content:
+                        # Determine role based on message type
+                        from langchain_core.messages import AIMessage, HumanMessage
+                        if isinstance(msg, AIMessage):
+                            role = "Assistant"
+                        elif isinstance(msg, HumanMessage):
+                            role = "User"
+                        else:
+                            role = "System" if hasattr(msg, '__class__') and "System" in msg.__class__.__name__ else "Other"
+                        
+                        content = msg.content[:200]  # Limit length
+                        context_parts.append(f"{role}: {content}")
+                
+                if context_parts:
+                    context_text = "\n\n**Recent Conversation Context**:\n" + "\n".join(context_parts)
+            
+            # Build prompt with context
+            prompt = self.CLASSIFICATION_PROMPT
+            if context_text:
+                prompt += "\n\n" + context_text
+            
             messages = [
-                SystemMessage(content=self.CLASSIFICATION_PROMPT),
-                HumanMessage(content=f"User message: {user_input}")
+                SystemMessage(content=prompt),
+                HumanMessage(content=f"**Current User Message**: {user_input}")
             ]
             
             # Call LLM

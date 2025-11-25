@@ -58,6 +58,7 @@ class Config:
     # Evaluation Settings
     EVALUATION_THRESHOLD: float = float(os.getenv("EVALUATION_THRESHOLD", "0.7"))  # 70% score threshold
     MAX_REVISIONS: int = int(os.getenv("MAX_REVISIONS", "2"))  # Maximum revision attempts
+    MAX_VALIDATOR_ATTEMPTS: int = int(os.getenv("MAX_VALIDATOR_ATTEMPTS", "2"))  # Maximum validator fix attempts
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

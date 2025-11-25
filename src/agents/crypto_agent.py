@@ -3,8 +3,11 @@ LangGraph-based crypto analysis agent.
 Uses MemorySaver for conversation persistence and modular tool architecture.
 """
 
-from typing import Dict, Any, List, TypedDict, Annotated
+from typing import Dict, Any, List, TypedDict, Annotated, Optional
 import logging
+import re
+import uuid
+from datetime import datetime, timedelta
 from langchain_openai import ChatOpenAI
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
@@ -35,6 +38,7 @@ from src.tools import (
     get_intent_classifier,
 )
 from src.utils import config, InputValidator
+from src.memory import history_store
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +91,9 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         price_analyzer: PriceAnalyzer,
         technical_analyzer: TechnicalAnalyzer,
         sentiment_analyzer: SentimentAnalyzer,
-        comparative_analyzer: ComparativeAnalyzer
+        comparative_analyzer: ComparativeAnalyzer,
+        user_id: str = "cli_user",
+        session_id: Optional[str] = None,
     ):
         """
         Initialize the crypto agent.
@@ -100,6 +106,8 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             comparative_analyzer: ComparativeAnalyzer instance
         """
         self.validator = InputValidator()
+        self.user_id = user_id
+        self.history_context_limit = config.HISTORY_CONTEXT_LIMIT
         
         # Initialize AI-powered intent classifier
         self.intent_classifier = get_intent_classifier()
@@ -144,7 +152,8 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
         self.graph = self._build_graph()
         
         # Thread config for conversation persistence
-        self.thread_id = "default_session"
+        self.thread_id = session_id or self._generate_session_id()
+        self._ensure_history_session()
         
         logger.info("✅ CryptoAgent initialized with LangGraph MemorySaver")
     
@@ -253,7 +262,7 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
                     logger.warning(f"Response may be incomplete - finish_reason: {finish_reason}, ends properly: {content_ends_properly}, length: {response_length}, last chars: {last_chars}")
                     
                     # If truncated or appears incomplete, try to continue the response
-                    if is_truncated or (response_length > 1000 and ends_mid_sentence):
+                    if is_truncated or (response_length > 400 and ends_mid_sentence):
                         logger.info("Attempting to continue truncated/incomplete response...")
                         continued_response = self._continue_truncated_response(messages, response)
                         if continued_response:
@@ -479,8 +488,20 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
             if self.validator.is_exit_command(user_input):
                 return "Goodbye! Thanks for using the Crypto Analysis Chatbot."
             
-            # Create human message
-            human_message = HumanMessage(content=user_input)
+            # Ensure history session exists
+            self._ensure_history_session()
+            
+            # Build optional historical context
+            context_text, context_count = self._build_history_context(user_input)
+            augmented_input = self._augment_user_input(user_input, context_text)
+            if context_count:
+                logger.info(f"Adding {context_count} historical messages to current prompt context")
+            
+            # Create human message with augmented content (if any)
+            human_message = HumanMessage(content=augmented_input)
+            
+            # Record user message in history store
+            self._record_history_message("user", user_input)
             
             # Prepare state update - LangGraph's MemorySaver will automatically load previous state
             # and merge with this update. The add_messages reducer will append new messages to existing ones.
@@ -519,11 +540,17 @@ Remember: Provide valuable, data-driven insights backed by real-time data."""
                     # Check if response seems incomplete (doesn't end with punctuation)
                     if not response_content.strip().endswith(('.', '!', '?', '。', '！', '？', '\n')):
                         logger.warning(f"Response may be incomplete - doesn't end with punctuation. Length: {len(response_content)}")
+                    self._record_history_message("assistant", response_content)
+                    return response_content
                 
-                return response_content if response_content else "I apologize, but I couldn't generate a response. Please try again."
+                fallback_msg = "I apologize, but I couldn't generate a response. Please try again."
+                self._record_history_message("assistant", fallback_msg)
+                return fallback_msg
             else:
                 logger.error(f"Unexpected response message type: {type(response_message)}")
-                return "I apologize, but I encountered an error processing the response. Please try again."
+                fallback_msg = "I apologize, but I encountered an error processing the response. Please try again."
+                self._record_history_message("assistant", fallback_msg)
+                return fallback_msg
             
         except Exception as e:
             logger.error(f"Error in chat: {e}", exc_info=True)
@@ -766,14 +793,115 @@ Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive
         except Exception as e:
             logger.error(f"Error retrieving conversation history: {e}")
             return []
+
+    def _ensure_history_session(self):
+        """Ensure the current session exists in the history store."""
+        try:
+            history_store.create_session(self.thread_id, self.user_id)
+        except Exception as e:
+            logger.warning(f"Unable to ensure history session: {e}")
+
+    def _record_history_message(self, role: str, content: str):
+        """Persist a message to SQLite history with metadata summary."""
+        if not content:
+            return
+        try:
+            metadata = {"summary": self._summarize_for_history(content)}
+            history_store.append_message(
+                session_id=self.thread_id,
+                user_id=self.user_id,
+                role=role,
+                content=content,
+                metadata=metadata,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record message history: {e}")
+
+    @staticmethod
+    def _summarize_for_history(content: str) -> str:
+        """Create a short summary for metadata storage."""
+        cleaned = " ".join(content.strip().split())
+        if len(cleaned) <= 160:
+            return cleaned
+        return f"{cleaned[:157]}..."
+
+    def _build_history_context(self, user_input: str) -> (str, int):
+        """Return formatted historical context and count based on relative time query."""
+        since_ts = self._parse_relative_time_query(user_input)
+        if not since_ts:
+            return "", 0
+        records = history_store.get_messages_since(
+            user_id=self.user_id,
+            since_ts=since_ts,
+            limit=self.history_context_limit,
+        )
+        if not records:
+            return "", 0
+        formatted = self._format_history_context(records)
+        return formatted, len(records)
+
+    def _augment_user_input(self, user_input: str, context_text: str) -> str:
+        """Append historical context snippet to the user input."""
+        if not context_text:
+            return user_input
+        return (
+            f"{user_input}\n\n"
+            "[Relevant earlier conversation]\n"
+            f"{context_text}"
+        )
+
+    def _parse_relative_time_query(self, user_input: str) -> Optional[int]:
+        """Parse phrases like 'yesterday' or '40 minutes ago' and return start timestamp."""
+        text = user_input.lower()
+        now = datetime.utcnow()
+
+        if "yesterday" in text:
+            start = now - timedelta(days=1)
+            return int(start.timestamp())
+
+        if "last week" in text:
+            start = now - timedelta(days=7)
+            return int(start.timestamp())
+
+        time_match = re.search(r"(\d+)\s+(minute|hour|day|week)s?\s+ago", text)
+        if time_match:
+            value = int(time_match.group(1))
+            unit = time_match.group(2)
+            delta_map = {
+                "minute": timedelta(minutes=value),
+                "hour": timedelta(hours=value),
+                "day": timedelta(days=value),
+                "week": timedelta(weeks=value),
+            }
+            start = now - delta_map.get(unit, timedelta())
+            return int(start.timestamp())
+
+        return None
+
+    @staticmethod
+    def _format_history_context(records: List[Dict[str, Any]]) -> str:
+        """Format history records into a readable snippet."""
+        lines = []
+        for record in records:
+            timestamp = datetime.utcfromtimestamp(record["timestamp"]).strftime("%Y-%m-%d %H:%M UTC")
+            role = record["role"].capitalize()
+            summary = record["metadata"].get("summary") if isinstance(record["metadata"], dict) else None
+            summary = summary or record["content"]
+            lines.append(f"{timestamp} - {role}: {summary}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _generate_session_id() -> str:
+        """Generate a new session identifier."""
+        return f"session_{uuid.uuid4().hex[:8]}"
     
     def clear_memory(self):
         """Clear conversation memory for current thread."""
         try:
             # Create new thread ID to start fresh
-            import uuid
-            self.thread_id = f"session_{uuid.uuid4().hex[:8]}"
+            self.thread_id = self._generate_session_id()
             logger.info(f"Memory cleared - new thread: {self.thread_id}")
+            self._ensure_history_session()
         except Exception as e:
             logger.error(f"Error clearing memory: {e}")
     
@@ -786,3 +914,4 @@ Keep it friendly, concise (2-3 sentences), and professional. Don't be dismissive
         """
         self.thread_id = session_id
         logger.info(f"Session set to: {session_id}")
+        self._ensure_history_session()

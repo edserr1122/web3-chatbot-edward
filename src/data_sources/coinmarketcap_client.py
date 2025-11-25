@@ -355,8 +355,15 @@ class CoinMarketCapClient(BaseAPIClient):
             bool: True if connection successful
         """
         try:
-            self.get_token_data("BTC")
-            return True
+            endpoint = "v1/cryptocurrency/map"
+            params = {"limit": 1}
+            response = self._make_request(
+                endpoint,
+                params,
+                force_refresh=True,
+                use_cache=False
+            )
+            return bool(response.get("data"))
         except Exception as e:
             logger.error(f"CoinMarketCap connection test failed: {e}")
             return False

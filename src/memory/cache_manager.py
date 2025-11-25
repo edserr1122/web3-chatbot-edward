@@ -51,14 +51,19 @@ class CacheManager:
                 # Redis cache
                 value = self.redis_client.get(key)
                 if value:
-                    logger.debug(f"Cache HIT: {key}")
+                    logger.info(f"♻️  Redis cache HIT: {key}")
                     return json.loads(value)
                 else:
-                    logger.debug(f"Cache MISS: {key}")
+                    logger.info(f"💨 Redis cache MISS: {key}")
                     return None
             else:
                 # In-memory cache
-                return self._memory_cache.get(key)
+                cached = self._memory_cache.get(key)
+                if cached is not None:
+                    logger.info(f"♻️  In-memory cache HIT: {key}")
+                else:
+                    logger.info(f"💨 In-memory cache MISS: {key}")
+                return cached
         except Exception as e:
             logger.error(f"Cache get error for key {key}: {e}")
             return None
@@ -85,11 +90,12 @@ class CacheManager:
                 # Redis cache
                 serialized = json.dumps(value)
                 self.redis_client.setex(key, ttl, serialized)
-                logger.debug(f"Cache SET: {key} (TTL: {ttl}s)")
+                logger.info(f"🗂️  Redis cache SET: {key} (TTL: {ttl}s)")
                 return True
             else:
                 # In-memory cache (no TTL for simplicity)
                 self._memory_cache[key] = value
+                logger.info(f"🗂️  In-memory cache SET: {key} (no TTL)")
                 return True
         except Exception as e:
             logger.error(f"Cache set error for key {key}: {e}")
@@ -111,9 +117,10 @@ class CacheManager:
         try:
             if self.redis_client:
                 self.redis_client.delete(key)
+                logger.info(f"🗑️  Redis cache DELETE: {key}")
             else:
                 self._memory_cache.pop(key, None)
-            logger.debug(f"Cache DELETE: {key}")
+                logger.info(f"🗑️  In-memory cache DELETE: {key}")
             return True
         except Exception as e:
             logger.error(f"Cache delete error for key {key}: {e}")

@@ -221,8 +221,21 @@ class CryptoPanicClient(BaseAPIClient):
             bool: True if connection successful
         """
         try:
-            self.get_news()
-            return True
+            endpoint = "posts/"
+            params = {
+                "auth_token": self.api_key,
+                "kind": "news",
+                "public": "true",
+                "regions": "en",
+                "per_page": 1,
+            }
+            response = self._make_request(
+                endpoint,
+                params,
+                force_refresh=True,
+                use_cache=False,
+            )
+            return bool(response.get("results"))
         except Exception as e:
             logger.error(f"CryptoPanic connection test failed: {e}")
             return False

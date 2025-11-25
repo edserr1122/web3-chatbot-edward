@@ -24,6 +24,7 @@ class CoinGeckoClient(BaseAPIClient):
         base_url = "https://api.coingecko.com/api/v3/" if not api_key else "https://pro-api.coingecko.com/api/v3/"
         super().__init__(api_key=api_key, base_url=base_url)
         self.min_request_interval = 1.5 if not api_key else 0.5  # Free tier rate limit
+        self._circuit_breaker_cooldown = 120  # 2 minutes cooldown for CoinGecko rate limits
         
     def _get_headers(self) -> Dict[str, str]:
         """Get headers with API key if available."""
@@ -67,6 +68,7 @@ class CoinGeckoClient(BaseAPIClient):
             "AAVE": "aave",
             "MKR": "maker",
             "SNX": "synthetix-network-token",
+            "TAO": "bittensor",  # Bittensor
         }
         
         return symbol_to_id.get(symbol.upper())
@@ -170,6 +172,118 @@ class CoinGeckoClient(BaseAPIClient):
         }
         
         return self._make_request(endpoint, params)
+    
+    def get_simple_price(self, symbols: List[str], include_market_cap: bool = True, 
+                         include_24h_vol: bool = True, include_24h_change: bool = True) -> Dict[str, Any]:
+        """
+        Get simple price data for multiple coins (LIGHTWEIGHT - faster than /coins/{id}).
+        
+        ⚡ Use this for:
+        - Quick price checks
+        - Comparative analysis (multiple tokens)
+        - When you don't need full metadata
+        
+        Args:
+            symbols: List of token symbols (e.g., ["BTC", "ETH"])
+            include_market_cap: Include market cap data
+            include_24h_vol: Include 24h volume
+            include_24h_change: Include 24h price change
+            
+        Returns:
+            dict: Price data for each coin
+        """
+        # Convert symbols to coin IDs
+        coin_ids = []
+        for symbol in symbols:
+            coin_id = self._get_coin_id(symbol)
+            if coin_id:
+                coin_ids.append(coin_id)
+        
+        if not coin_ids:
+            raise ValueError(f"No valid symbols provided: {symbols}")
+        
+        endpoint = "simple/price"
+        params = {
+            "ids": ",".join(coin_ids),
+            "vs_currencies": "usd",
+            "include_market_cap": str(include_market_cap).lower(),
+            "include_24hr_vol": str(include_24h_vol).lower(),
+            "include_24hr_change": str(include_24h_change).lower(),
+        }
+        
+        return self._make_request(endpoint, params)
+    
+    def get_coins_markets(self, symbols: Optional[List[str]] = None, 
+                          per_page: int = 250, page: int = 1) -> List[Dict[str, Any]]:
+        """
+        Get market data for multiple coins in one call (EFFICIENT for comparative analysis).
+        
+        ⚡ Use this for:
+        - Comparative analysis
+        - Top N coins by market cap
+        - Getting multiple coins data efficiently
+        
+        Args:
+            symbols: Optional list of symbols to filter (if None, returns top coins)
+            per_page: Results per page (max 250)
+            page: Page number
+            
+        Returns:
+            list: Market data for each coin
+        """
+        endpoint = "coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": min(per_page, 250),
+            "page": page,
+            "sparkline": "false",
+            "price_change_percentage": "24h,7d,30d"
+        }
+        
+        # Filter by specific coin IDs if symbols provided
+        if symbols:
+            coin_ids = []
+            for symbol in symbols:
+                coin_id = self._get_coin_id(symbol)
+                if coin_id:
+                    coin_ids.append(coin_id)
+            
+            if coin_ids:
+                params["ids"] = ",".join(coin_ids)
+        
+        return self._make_request(endpoint, params)
+    
+    def get_global_data(self) -> Dict[str, Any]:
+        """
+        Get global cryptocurrency market data.
+        
+        Returns:
+            dict: Global market stats (total market cap, volume, BTC dominance, etc.)
+        """
+        endpoint = "global"
+        response = self._make_request(endpoint)
+        return response.get("data", {})
+    
+    def get_trending(self) -> Dict[str, Any]:
+        """
+        Get trending coins in the last 24 hours.
+        
+        Returns:
+            dict: Trending coins, NFTs, and categories
+        """
+        endpoint = "search/trending"
+        return self._make_request(endpoint)
+    
+    def get_categories(self) -> List[Dict[str, Any]]:
+        """
+        Get all coin categories with market data.
+        
+        Returns:
+            list: Categories with market cap, volume, market cap change
+        """
+        endpoint = "coins/categories"
+        return self._make_request(endpoint)
     
     def test_connection(self) -> bool:
         """

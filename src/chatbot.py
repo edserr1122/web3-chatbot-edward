@@ -20,7 +20,7 @@ from src.data_sources import (
     MessariClient,
     FearGreedClient,
 )
-from src.utils import config
+from src.utils import config, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ class CryptoChatbot:
     
     def __init__(self):
         """Initialize the chatbot with all components."""
+        # Ensure logging is configured even in non-CLI contexts (tests, notebooks, etc.)
+        setup_logging(enable_console=False)
         logger.info("🚀 Initializing Crypto Analysis Chatbot...")
         
         # Validate configuration

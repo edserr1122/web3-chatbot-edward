@@ -21,6 +21,7 @@ class Config:
     # Groq Configuration
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    GROQ_INTENT_CLASSIFIER_MODEL: str = os.getenv("GROQ_INTENT_CLASSIFIER_MODEL", "gemma-7b-it")  # Smaller, faster model for intent classification
     
     # Crypto Data API Keys
     COINGECKO_API_KEY: Optional[str] = os.getenv("COINGECKO_API_KEY")

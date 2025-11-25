@@ -55,6 +55,10 @@ class Config:
     )
     HISTORY_CONTEXT_LIMIT: int = int(os.getenv("HISTORY_CONTEXT_LIMIT", "20"))
     
+    # Evaluation Settings
+    EVALUATION_THRESHOLD: float = float(os.getenv("EVALUATION_THRESHOLD", "0.7"))  # 70% score threshold
+    MAX_REVISIONS: int = int(os.getenv("MAX_REVISIONS", "2"))  # Maximum revision attempts
+    
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

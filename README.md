@@ -36,7 +36,7 @@ An AI-powered conversational agent for comprehensive cryptocurrency token analys
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.13 (not 3.14)
 - Redis (optional, for caching)
 - API keys for data sources (see `.env.example`)
 
@@ -89,7 +89,7 @@ src/
 ├── analyzers/       # Analysis type implementations
 ├── data_sources/    # API client integrations
 ├── memory/          # Conversation history & caching
-├── tools/           # LangGraph tools for agent
+├── tools/           # LangChain tools for agent
 ├── utils/           # Configuration & logging
 └── chatbot.py       # Main chatbot class that can be used in any type of interfaces
 
@@ -103,9 +103,13 @@ main.py              # Entry point
 
 Key environment variables (see `.env.example` for full list):
 
-- `GROQ_API_KEY`: Required - LLM provider API key
+- `GROQ_API_KEY`: Required - GROQ API key
+- `GROQ_MODEL`: Required - GROQ model for inference (recommended: qwen/qwen3-32b)
+- `GROQ_INTENT_CLASSIFIER_MODEL`: Required - GROQ model for other features (recommended: llama-3.1-8b-instant)
 - `COINMARKETCAP_API_KEY`: Required - For CoinMarketCap data
 - `COINCAP_API_KEY`: Required - For CoinCap data
+- `CRYPTOPANIC_API_KEY`: Required - For CryptoPanic data
+- `MESSARI_API_KEY`: Required - For Messari data
 - `REDIS_URL`: Optional - For response caching
 - `HISTORY_DB_PATH`: Optional - SQLite database path (default: `data/chat_history.db`)
 
